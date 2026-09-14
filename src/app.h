@@ -17,6 +17,7 @@
 #include <QTabWidget>
 #include <QSet>
 #include <QThread>
+#include <memory>
 
 namespace ld {
 class Listener : public QTcpServer {
@@ -35,7 +36,9 @@ public:
     QString invitation() const;
     bool running() const { return server_.isListening(); }
     void configureVideo(int fps, const QString &codec) { targetFps_ = fps; codecPreference_ = codec; }
+    void setLockOnDisconnect(bool enabled) { lockOnDisconnect_ = enabled; }
 signals: void status(QString text);
+    void desktopLockRequested();
     void produceFrame(quint64 generation);
     void encodeFrame(quint64 generation, QImage image, QRect bounds, QString codec, int fps, double captureMs, QString backend);
 private:
@@ -66,6 +69,7 @@ private:
     QElapsedTimer lastMessage_, packetWindow_;
     int packets_ = 0;
     bool authenticated_ = false, control_ = false;
+    bool lockOnDisconnect_ = true;
     QRect screen_;
 };
 class Client : public QObject {
@@ -134,12 +138,32 @@ private:
     QSet<int> pressedButtons_;
     quint64 frameSerial_ = 0, paintedSerial_ = 0;
 };
+class ControlWindow : public QMainWindow {
+    Q_OBJECT
+public:
+    explicit ControlWindow();
+    Viewer *viewer() const { return viewer_; }
+    void setStatus(const QString &text);
+    void setStatistics(const QString &text);
+    void sessionEnded();
+signals:
+    void disconnectRequested();
+    void releaseRequested();
+protected:
+    void closeEvent(QCloseEvent *event) override;
+private:
+    Viewer *viewer_;
+    QLabel *status_;
+    QLabel *performance_;
+};
 class Window : public QMainWindow {
     Q_OBJECT
 public:
     explicit Window();
+    ~Window() override;
     bool startHost(const QString &bind = {}, quint16 port = DefaultPort, const QString &inviteFile = {});
     void setViewOnly() { allowControl_->setChecked(false); }
+    void setLockOnDisconnect(bool enabled) { lockOnDisconnect_->setChecked(enabled); }
     void connectFile(const QString &path);
     void configureVideo(int fps, const QString &codec);
     void setStatsFile(const QString &path) { client_.setStatsFile(path); }
@@ -153,12 +177,12 @@ private:
     QSpinBox *port_;
     QComboBox *fps_, *codec_;
     QCheckBox *allowControl_;
+    QCheckBox *lockOnDisconnect_;
     QPushButton *share_;
     QPlainTextEdit *invitation_;
     QPlainTextEdit *connectCode_;
     QLabel *status_;
-    QLabel *performance_;
     QTabWidget *tabs_;
-    Viewer *viewer_;
+    std::unique_ptr<ControlWindow> controlWindow_;
 };
 }

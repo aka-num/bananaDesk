@@ -33,6 +33,8 @@ def check(name):
     print("PASS", name, flush=True)
 
 def launch(command, env, logfile):
+    if "--host" in command and "--no-lock-on-disconnect" not in command:
+        command = list(command) + ["--no-lock-on-disconnect"]
     handle = open(logfile, "w")
     handles.append(handle)
     process = subprocess.Popen(command, env=env, stdout=handle, stderr=subprocess.STDOUT)

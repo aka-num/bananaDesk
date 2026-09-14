@@ -50,6 +50,8 @@ class Run:
         self.handles = []
 
     def launch(self, command, env, name, pass_fds=()):
+        if "--host" in command and "--no-lock-on-disconnect" not in command:
+            command = list(command) + ["--no-lock-on-disconnect"]
         handle = (self.directory / (name + ".log")).open("w")
         self.handles.append(handle)
         process = subprocess.Popen(command, env=env, stdout=handle,

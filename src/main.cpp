@@ -54,12 +54,13 @@ int main(int argc, char **argv) {
     QApplication::setAttribute(Qt::AA_DisableHighDpiScaling);
 #endif
     QApplication app(argc, argv);
-    QCoreApplication::setApplicationName("LanDesk"); QCoreApplication::setApplicationVersion("0.3.0");
+    QCoreApplication::setApplicationName("LanDesk"); QCoreApplication::setApplicationVersion("0.4.0");
     qRegisterMetaType<quint64>("quint64");
     QCommandLineParser parser; parser.setApplicationDescription(QStringLiteral("局域网远程桌面，TLS 指纹验证与临时连接码"));
     parser.addHelpOption(); parser.addVersionOption();
     parser.addOption({"host", "Start sharing after opening the window"});
     parser.addOption({"view-only", "Allow viewing only when sharing"});
+    parser.addOption({"no-lock-on-disconnect", "Do not lock the host desktop when an authenticated session ends"});
     parser.addOption({"bind", "Local IPv4 address to bind", "address"});
     parser.addOption({"port", "TCP port", "port", QString::number(ld::DefaultPort)});
     parser.addOption({"invite-file", "Write the private invitation to this file (host mode)", "path"});
@@ -109,6 +110,7 @@ int main(int argc, char **argv) {
     ld::Window window;
     window.configureVideo(fps, codec); window.setStatsFile(parser.value("stats-file"));
     if (parser.isSet("view-only")) window.setViewOnly();
+    if (parser.isSet("no-lock-on-disconnect")) window.setLockOnDisconnect(false);
     window.show();
     std::signal(SIGINT, onSignal); std::signal(SIGTERM, onSignal);
     QTimer terminationTimer;

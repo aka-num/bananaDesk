@@ -1,5 +1,6 @@
 #include "app.h"
 #include "video_codec.h"
+#include "desktop_lock.h"
 #include <QApplication>
 #include <QScreen>
 #include <QBuffer>
@@ -18,6 +19,7 @@
 #include <QSaveFile>
 #include <QMessageBox>
 #include <QStatusBar>
+#include <QScrollArea>
 #include <QDebug>
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -86,6 +88,7 @@ void Host::stop() {
     timer_.stop(); server_.close(); drop(QString()); identity_ = Identity();
 }
 void Host::drop(const QString &reason) {
+    const bool shouldLock = authenticated_ && lockOnDisconnect_;
     ++generation_;
     worker_->activate(generation_); encoder_->activate(generation_);
     input_.releaseAll(); authenticated_ = false; captureBusy_ = false; inFlight_ = 0; encodeQueued_ = 0; screen_ = {};
@@ -94,6 +97,7 @@ void Host::drop(const QString &reason) {
         old->disconnect(this); old->abort(); old->deleteLater();
     }
     if (!reason.isEmpty()) emit status(reason);
+    if (shouldLock) emit desktopLockRequested();
 }
 void Host::accept(qintptr descriptor) {
     auto *socket = new QSslSocket(this);
@@ -298,7 +302,8 @@ void Client::reportStats() {
 }
 
 Viewer::Viewer(QWidget *parent) : QWidget(parent) {
-    setFocusPolicy(Qt::StrongFocus); setMouseTracking(true); setMinimumSize(480, 270);
+    setFocusPolicy(Qt::StrongFocus); setMouseTracking(true); setMinimumSize(160, 90);
+    setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
 }
 void Viewer::setFrame(QImage image) { image_ = std::move(image); ++frameSerial_; update(); }
 void Viewer::setControl(bool enabled) { control_ = enabled; if (!enabled) { pressedButtons_.clear(); emit releaseKeys(); } }
@@ -360,8 +365,36 @@ void Viewer::keyReleaseEvent(QKeyEvent *e) {
 }
 void Viewer::focusOutEvent(QFocusEvent *e) { pressedButtons_.clear(); emit releaseKeys(); QWidget::focusOutEvent(e); }
 
-Window::Window() : host_(this), client_(this) {
-    setWindowTitle(QStringLiteral("LanDesk · 局域网远程桌面")); resize(1120, 760);
+ControlWindow::ControlWindow() {
+    setWindowTitle(QStringLiteral("LanDesk · 控制远程桌面"));
+    QSize initialSize(1120, 760);
+    if (auto *screen = QGuiApplication::primaryScreen()) initialSize = initialSize.boundedTo(screen->availableGeometry().size() * 0.9);
+    resize(initialSize);
+    auto *root = new QWidget; auto *layout = new QVBoxLayout(root);
+    auto *actions = new QHBoxLayout;
+    auto *disconnectButton = new QPushButton(QStringLiteral("断开连接"));
+    auto *releaseButton = new QPushButton(QStringLiteral("释放远程按键"));
+    actions->addWidget(disconnectButton); actions->addWidget(releaseButton); actions->addStretch();
+    layout->addLayout(actions);
+    viewer_ = new Viewer; layout->addWidget(viewer_, 1);
+    status_ = new QLabel; status_->setWordWrap(true); layout->addWidget(status_);
+    performance_ = new QLabel; performance_->setWordWrap(true); layout->addWidget(performance_);
+    auto *hint = new QLabel(QStringLiteral("Ctrl + Alt + Shift + Esc 释放键盘；关闭此窗口会断开连接。"));
+    hint->setWordWrap(true); hint->setStyleSheet("color:#52677d"); layout->addWidget(hint);
+    setCentralWidget(root);
+    connect(disconnectButton, &QPushButton::clicked, this, &ControlWindow::disconnectRequested);
+    connect(releaseButton, &QPushButton::clicked, this, &ControlWindow::releaseRequested);
+}
+void ControlWindow::setStatus(const QString &text) { status_->setText(text); }
+void ControlWindow::setStatistics(const QString &text) { performance_->setText(text); }
+void ControlWindow::sessionEnded() { viewer_->reset(); performance_->clear(); hide(); }
+void ControlWindow::closeEvent(QCloseEvent *event) { emit disconnectRequested(); event->accept(); }
+
+Window::Window() : host_(this), client_(this), controlWindow_(std::make_unique<ControlWindow>()) {
+    setWindowTitle(QStringLiteral("LanDesk · 局域网远程桌面"));
+    QSize initialSize(1120, 760);
+    if (auto *screen = QGuiApplication::primaryScreen()) initialSize = initialSize.boundedTo(screen->availableGeometry().size() * 0.9);
+    resize(initialSize);
     auto *root = new QWidget; auto *layout = new QVBoxLayout(root); layout->setContentsMargins(22, 18, 22, 12);
     auto *title = new QLabel(QStringLiteral("LanDesk")); title->setStyleSheet("font-size:26px;font-weight:600;color:#16324f");
     auto *subtitle = new QLabel(QStringLiteral("局域网直连 · 加密连接 · Windows / Linux")); subtitle->setStyleSheet("color:#52677d;margin-bottom:10px");
@@ -391,21 +424,24 @@ Window::Window() : host_(this), client_(this) {
     codec_->addItem(QStringLiteral("JPEG（兼容模式）"), "jpeg");
     form->addRow(QStringLiteral("目标帧率"), fps_); form->addRow(QStringLiteral("视频编码"), codec_);
     allowControl_ = new QCheckBox(QStringLiteral("允许对方操作键盘和鼠标")); allowControl_->setChecked(true); shareLayout->addWidget(allowControl_);
+    lockOnDisconnect_ = new QCheckBox(QStringLiteral("远程会话断开后自动锁定本机")); lockOnDisconnect_->setChecked(true); shareLayout->addWidget(lockOnDisconnect_);
+    auto *lockHint = new QLabel(QStringLiteral("锁屏后需在本机解锁；当前版本不支持远程解锁。")); lockHint->setWordWrap(true); lockHint->setStyleSheet("color:#52677d"); shareLayout->addWidget(lockHint);
     share_ = new QPushButton(QStringLiteral("开始共享")); share_->setMinimumHeight(38); shareLayout->addWidget(share_);
     shareLayout->addWidget(new QLabel(QStringLiteral("连接码（包含访问密钥，请只交给可信设备）")));
     invitation_ = new QPlainTextEdit; invitation_->setReadOnly(true); invitation_->setMaximumHeight(125); invitation_->setPlaceholderText(QStringLiteral("开始共享后生成连接码")); shareLayout->addWidget(invitation_);
     auto *copy = new QPushButton(QStringLiteral("复制连接码")); shareLayout->addWidget(copy); shareLayout->addStretch();
-    tabs_->addTab(sharePage, QStringLiteral("共享本机"));
+    // QTabWidget includes hidden pages in its minimum size. Let the sharing
+    // form scroll so it cannot prevent the controller page from shrinking.
+    auto *shareScroll = new QScrollArea; shareScroll->setWidgetResizable(true);
+    shareScroll->setFrameShape(QFrame::NoFrame); shareScroll->setWidget(sharePage);
+    tabs_->addTab(shareScroll, QStringLiteral("共享本机"));
     auto *viewPage = new QWidget; auto *viewLayout = new QVBoxLayout(viewPage); viewLayout->setContentsMargins(12, 12, 12, 12);
-    connectCode_ = new QPlainTextEdit; connectCode_->setPlaceholderText(QStringLiteral("粘贴另一台电脑生成的 landesk1: 连接码")); connectCode_->setMaximumHeight(72); viewLayout->addWidget(connectCode_);
-    auto *actions = new QHBoxLayout; auto *connectButton = new QPushButton(QStringLiteral("连接")); auto *disconnectButton = new QPushButton(QStringLiteral("断开")); auto *releaseButton = new QPushButton(QStringLiteral("释放远程按键"));
-    actions->addWidget(connectButton); actions->addWidget(disconnectButton); actions->addWidget(releaseButton); actions->addStretch(); viewLayout->addLayout(actions);
-    viewer_ = new Viewer; viewLayout->addWidget(viewer_, 1);
-    auto *hint = new QLabel(QStringLiteral("点击画面开始操作；Ctrl + Alt + Shift + Esc 释放键盘。系统保留快捷键、中文输入法需另行验证。")); hint->setWordWrap(true); viewLayout->addWidget(hint);
+    connectCode_ = new QPlainTextEdit; connectCode_->setPlaceholderText(QStringLiteral("粘贴另一台电脑生成的 landesk1: 连接码")); connectCode_->setMinimumHeight(44); connectCode_->setMaximumHeight(100); viewLayout->addWidget(connectCode_);
+    auto *actions = new QHBoxLayout; auto *connectButton = new QPushButton(QStringLiteral("连接")); auto *disconnectButton = new QPushButton(QStringLiteral("断开"));
+    actions->addWidget(connectButton); actions->addWidget(disconnectButton); actions->addStretch(); viewLayout->addLayout(actions);
+    auto *hint = new QLabel(QStringLiteral("连接成功后，远程画面会在独立控制窗口中打开。可拖动窗口边缘调整大小，或双击标题栏最大化。")); hint->setWordWrap(true); viewLayout->addWidget(hint); viewLayout->addStretch();
     tabs_->addTab(viewPage, QStringLiteral("连接远程桌面"));
     status_ = new QLabel(QStringLiteral("尚未共享或连接")); status_->setWordWrap(true); status_->setStyleSheet("padding:9px;background:#edf3f8;color:#16324f;border-radius:5px"); layout->addWidget(status_);
-    performance_ = new QLabel(QStringLiteral("目标 60 fps · 连接后显示实际解码与绘制帧率"));
-    performance_->setStyleSheet("color:#52677d;padding:3px"); layout->addWidget(performance_);
     setCentralWidget(root);
     connect(share_, &QPushButton::clicked, this, [this] {
         if (host_.running()) { host_.stop(); invitation_->clear(); share_->setText(QStringLiteral("开始共享")); addresses_->setEnabled(true); port_->setEnabled(true); allowControl_->setEnabled(true); fps_->setEnabled(true); codec_->setEnabled(true); showStatus(QStringLiteral("共享已停止，连接码已撤销")); }
@@ -414,16 +450,29 @@ Window::Window() : host_(this), client_(this) {
     connect(copy, &QPushButton::clicked, this, [this] { if (!invitation_->toPlainText().isEmpty()) QApplication::clipboard()->setText(invitation_->toPlainText()); });
     connect(connectButton, &QPushButton::clicked, this, &Window::connectCode);
     connect(disconnectButton, &QPushButton::clicked, this, [this] { client_.stop(); showStatus(QStringLiteral("已断开")); });
-    connect(releaseButton, &QPushButton::clicked, &client_, &Client::release);
-    connect(&host_, &Host::status, this, &Window::showStatus); connect(&client_, &Client::status, this, &Window::showStatus);
-    connect(&client_, &Client::frame, viewer_, &Viewer::setFrame); connect(&client_, &Client::capability, viewer_, &Viewer::setControl);
-    connect(&client_, &Client::disconnected, viewer_, &Viewer::reset);
-    connect(&client_, &Client::disconnected, this, [this] { performance_->setText(QStringLiteral("未连接 · 连接后显示实际帧率")); });
-    connect(viewer_, &Viewer::input, &client_, &Client::sendInput); connect(viewer_, &Viewer::releaseKeys, &client_, &Client::release);
-    connect(viewer_, &Viewer::presented, &client_, &Client::recordPaint);
-    connect(&client_, &Client::statistics, performance_, &QLabel::setText);
+    connect(controlWindow_.get(), &ControlWindow::disconnectRequested, this, [this] { client_.stop(); showStatus(QStringLiteral("已断开")); });
+    connect(controlWindow_.get(), &ControlWindow::releaseRequested, &client_, &Client::release);
+    connect(lockOnDisconnect_, &QCheckBox::toggled, &host_, &Host::setLockOnDisconnect);
+    connect(&host_, &Host::desktopLockRequested, this, [this] {
+        QString error;
+        if (lockDesktop(error)) showStatus(QStringLiteral("远程会话已结束 · 已请求系统锁定本机"));
+        else showStatus(QStringLiteral("远程会话已结束，但锁屏失败：") + error);
+    });
+    connect(&host_, &Host::status, this, &Window::showStatus);
+    connect(&client_, &Client::status, this, [this](const QString &text) { showStatus(text); controlWindow_->setStatus(text); });
+    auto *viewer = controlWindow_->viewer();
+    connect(&client_, &Client::frame, viewer, &Viewer::setFrame);
+    connect(&client_, &Client::capability, this, [this](bool control) {
+        controlWindow_->viewer()->setControl(control);
+        if (!controlWindow_->isVisible()) { controlWindow_->show(); controlWindow_->raise(); controlWindow_->activateWindow(); }
+    });
+    connect(&client_, &Client::disconnected, controlWindow_.get(), &ControlWindow::sessionEnded);
+    connect(viewer, &Viewer::input, &client_, &Client::sendInput); connect(viewer, &Viewer::releaseKeys, &client_, &Client::release);
+    connect(viewer, &Viewer::presented, &client_, &Client::recordPaint);
+    connect(&client_, &Client::statistics, controlWindow_.get(), &ControlWindow::setStatistics);
     connect(qApp, &QGuiApplication::applicationStateChanged, this, [this](Qt::ApplicationState state) { if (state != Qt::ApplicationActive) client_.release(); });
 }
+Window::~Window() { client_.stop(); host_.stop(); }
 void Window::showStatus(const QString &text) { status_->setText(text); qInfo().noquote() << text; }
 void Window::configureVideo(int fps, const QString &codec) {
     fps_->setCurrentIndex(qMax(0, fps_->findData(fps)));

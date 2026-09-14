@@ -12,6 +12,8 @@ fps=importlib.util.module_from_spec(spec);spec.loader.exec_module(fps)
 
 class Run(fps.Run):
     def launch(self, command, env, name, pass_fds=()):
+        if "--host" in command and "--no-lock-on-disconnect" not in command:
+            command = list(command) + ["--no-lock-on-disconnect"]
         handle=(self.directory/(name+'.log')).open('w');self.handles.append(handle)
         p=subprocess.Popen([str(x) for x in command],env=env,stdout=handle,stderr=subprocess.STDOUT,pass_fds=pass_fds,start_new_session=True)
         self.processes.append(p);return p
