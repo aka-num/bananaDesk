@@ -208,7 +208,11 @@ struct VideoEncoder::Impl {
         context->thread_count = std::clamp(QThread::idealThreadCount() / 2, 1, 8);
         context->thread_type = FF_THREAD_SLICE;
         context->flags |= AV_CODEC_FLAG_LOW_DELAY;
+#ifdef AV_PROFILE_H264_BASELINE
+        context->profile = AV_PROFILE_H264_BASELINE;
+#else
         context->profile = FF_PROFILE_H264_BASELINE;
+#endif
         context->color_range = AVCOL_RANGE_MPEG;
         context->colorspace = AVCOL_SPC_BT709;
         context->color_primaries = AVCOL_PRI_BT709;

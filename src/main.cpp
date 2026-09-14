@@ -2,6 +2,15 @@
 #include "video_codec.h"
 #include <QApplication>
 #include <QCommandLineParser>
+#include <QDateTime>
+#include <QDir>
+#include <QFile>
+#include <QJsonDocument>
+#include <QMessageBox>
+#include <QMutex>
+#include <QMutexLocker>
+#include <QSaveFile>
+#include <QStandardPaths>
 #include <QTimer>
 #include <cstdio>
 #include <csignal>
@@ -14,6 +23,24 @@
 
 static volatile std::sig_atomic_t interrupted = 0;
 static void onSignal(int) { interrupted = 1; }
+static QFile diagnosticLog;
+static QMutex diagnosticMutex;
+static void logMessage(QtMsgType type, const QMessageLogContext &, const QString &message) {
+    const QByteArray line = (QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs)
+        + QStringLiteral(" [%1] ").arg(int(type)) + message + '\n').toUtf8();
+    QMutexLocker lock(&diagnosticMutex);
+    diagnosticLog.write(line); diagnosticLog.flush();
+    std::fwrite(line.constData(), 1, size_t(line.size()), stderr);
+}
+static int startupFailure(const QString &message, bool interactive = true) {
+    qCritical().noquote() << message;
+#ifdef Q_OS_WIN
+    if (interactive) QMessageBox::critical(nullptr, QStringLiteral("LanDesk 无法启动"), message);
+#else
+    Q_UNUSED(interactive);
+#endif
+    return 2;
+}
 int main(int argc, char **argv) {
 #ifndef Q_OS_WIN
     XInitThreads();
@@ -27,7 +54,7 @@ int main(int argc, char **argv) {
     QApplication::setAttribute(Qt::AA_DisableHighDpiScaling);
 #endif
     QApplication app(argc, argv);
-    QCoreApplication::setApplicationName("LanDesk"); QCoreApplication::setApplicationVersion("0.2.0");
+    QCoreApplication::setApplicationName("LanDesk"); QCoreApplication::setApplicationVersion("0.3.0");
     qRegisterMetaType<quint64>("quint64");
     QCommandLineParser parser; parser.setApplicationDescription(QStringLiteral("局域网远程桌面，TLS 指纹验证与临时连接码"));
     parser.addHelpOption(); parser.addVersionOption();
@@ -40,16 +67,45 @@ int main(int argc, char **argv) {
     parser.addOption({"fps", "Target frame rate: 15, 30 or 60", "fps", "60"});
     parser.addOption({"codec", "Video codec: auto, h264 or jpeg", "codec", "auto"});
     parser.addOption({"stats-file", "Write client frame counters to a JSON file", "path"});
+    parser.addOption({"log-file", "Write diagnostic messages (no invitation or input content)", "path"});
+    parser.addOption({"diagnostics-file", "Check runtime dependencies, write JSON and exit", "path"});
     parser.process(app);
+    QString logPath = parser.value("log-file");
+#ifdef Q_OS_WIN
+    if (logPath.isEmpty()) {
+        const QString dir = QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation);
+        if (QDir().mkpath(dir)) logPath = dir + "/landesk.log";
+    }
+#endif
+    if (!logPath.isEmpty()) {
+        diagnosticLog.setFileName(logPath);
+        if (!diagnosticLog.open(QIODevice::WriteOnly | QIODevice::Truncate))
+            return startupFailure(QStringLiteral("无法写入日志文件：%1").arg(logPath), !parser.isSet("diagnostics-file"));
+        qInstallMessageHandler(logMessage);
+    }
+    const bool tlsAvailable = QSslSocket::supportsSsl();
+    const bool h264Available = ld::VideoEncoder::available() && ld::VideoDecoder::available();
+    qInfo().noquote() << QStringLiteral("LanDesk %1 · Qt %2 · TLS %3 · H.264 %4")
+        .arg(QCoreApplication::applicationVersion(), qVersion(), QSslSocket::sslLibraryVersionString(), h264Available ? "available" : "unavailable");
+    if (parser.isSet("diagnostics-file")) {
+        QJsonObject report{{"version", QCoreApplication::applicationVersion()}, {"qt", qVersion()},
+            {"tls_available", tlsAvailable}, {"tls_version", QSslSocket::sslLibraryVersionString()},
+            {"h264_available", h264Available}, {"platform", QGuiApplication::platformName()}};
+        QSaveFile file(parser.value("diagnostics-file"));
+        if (!file.open(QIODevice::WriteOnly)) return startupFailure(QStringLiteral("无法写入诊断文件"), false);
+        const QByteArray data = QJsonDocument(report).toJson();
+        if (file.write(data) != data.size() || !file.commit()) return startupFailure(QStringLiteral("诊断文件写入失败"), false);
+        return tlsAvailable && h264Available ? 0 : 2;
+    }
     bool validPort = false; const int port = parser.value("port").toInt(&validPort);
-    if (!validPort || port < 1024 || port > 65535) { std::fprintf(stderr, "Port must be between 1024 and 65535\n"); return 2; }
+    if (!validPort || port < 1024 || port > 65535) return startupFailure(QStringLiteral("端口必须在 1024 到 65535 之间"));
     const int fps = parser.value("fps").toInt();
     const QString codec = parser.value("codec");
     if ((fps != 15 && fps != 30 && fps != 60) || (codec != "auto" && codec != "h264" && codec != "jpeg")) {
-        std::fprintf(stderr, "Unsupported frame rate or codec\n"); return 2;
+        return startupFailure(QStringLiteral("不支持的帧率或编码参数"));
     }
-    if (codec == "h264" && !ld::VideoEncoder::available()) { std::fprintf(stderr, "H.264 unavailable in this build\n"); return 2; }
-    if (!QSslSocket::supportsSsl()) { std::fprintf(stderr, "Qt TLS backend unavailable\n"); return 2; }
+    if (codec == "h264" && !h264Available) return startupFailure(QStringLiteral("H.264 编码或解码不可用，请重新完整解压运行包"));
+    if (!tlsAvailable) return startupFailure(QStringLiteral("TLS 不可用，请重新完整解压运行包，确认 OpenSSL DLL 未缺失"));
     ld::Window window;
     window.configureVideo(fps, codec); window.setStatsFile(parser.value("stats-file"));
     if (parser.isSet("view-only")) window.setViewOnly();
