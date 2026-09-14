@@ -18,7 +18,7 @@ public:
     ~CaptureWorker() override;
     void activate(quint64 generation) { activeGeneration_.store(generation, std::memory_order_relaxed); }
 public slots:
-    void produce(quint64 generation);
+    void produce(quint64 generation, bool useHelper = false);
 signals:
     void captured(quint64 generation, QImage image, QRect bounds, double captureMs, QString backend);
     void failed(quint64 generation, QString error);

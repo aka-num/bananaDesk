@@ -10,7 +10,7 @@
 namespace ld {
 constexpr quint16 DefaultPort = 24832;
 constexpr quint32 MaxPacket = 8 * 1024 * 1024;
-enum class Packet : char { Auth = 'A', Welcome = 'W', Image = 'F', Ack = 'K', Input = 'I', Release = 'R', Ping = 'P', Pong = 'Q', Error = 'E' };
+enum class Packet : char { Auth = 'A', Welcome = 'W', Image = 'F', Ack = 'K', Input = 'I', Release = 'R', Wake = 'U', File = 'T', Ping = 'P', Pong = 'Q', Error = 'E' };
 QByteArray json(const QJsonObject &object);
 bool object(const QByteArray &data, QJsonObject &out);
 bool equalSecret(const QByteArray &a, const QByteArray &b);
@@ -38,6 +38,7 @@ public:
     explicit Wire(QSslSocket *socket, quint32 receiveLimit, QObject *parent);
     QSslSocket *socket() const { return socket_; }
     bool send(Packet type, const QByteArray &payload = {});
+    void setReceiveLimit(quint32 limit) { receiveLimit_ = limit; }
 signals:
     void packet(ld::Packet type, QByteArray payload);
     void failure(QString message);

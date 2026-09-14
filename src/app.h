@@ -2,6 +2,7 @@
 #include "protocol.h"
 #include "native_input.h"
 #include "video_pipeline.h"
+#include "file_transfer.h"
 #include <QMainWindow>
 #include <QTcpServer>
 #include <QTimer>
@@ -20,6 +21,7 @@
 #include <memory>
 
 namespace ld {
+class FileTransferDialog;
 class Listener : public QTcpServer {
     Q_OBJECT
 public: using QTcpServer::QTcpServer;
@@ -37,9 +39,10 @@ public:
     bool running() const { return server_.isListening(); }
     void configureVideo(int fps, const QString &codec) { targetFps_ = fps; codecPreference_ = codec; }
     void setLockOnDisconnect(bool enabled) { lockOnDisconnect_ = enabled; }
+    void configureFiles(const QString &root, bool enabled) { fileRoot_ = root; filesEnabled_ = enabled; }
 signals: void status(QString text);
     void desktopLockRequested();
-    void produceFrame(quint64 generation);
+    void produceFrame(quint64 generation, bool useHelper);
     void encodeFrame(quint64 generation, QImage image, QRect bounds, QString codec, int fps, double captureMs, QString backend);
 private:
     void accept(qintptr descriptor);
@@ -49,6 +52,7 @@ private:
     void encoded(quint64 generation, QRect bounds, QByteArray bytes, QString codec,
                  double captureMs, double encodeMs, QString backend);
     void drop(const QString &reason);
+    void releaseInput();
     Listener server_;
     Identity identity_;
     NativeInput input_;
@@ -70,7 +74,12 @@ private:
     int packets_ = 0;
     bool authenticated_ = false, control_ = false;
     bool lockOnDisconnect_ = true;
+    bool helperMode_ = false, loginScreen_ = false;
+    QElapsedTimer wakeClock_;
     QRect screen_;
+    FileTransferHost files_;
+    QString fileRoot_;
+    bool filesEnabled_ = false, filesAllowed_ = false;
 };
 class Client : public QObject {
     Q_OBJECT
@@ -81,12 +90,15 @@ public:
     void stop();
     void sendInput(const QJsonObject &event);
     void release();
+    void wakeDesktop();
+    FileTransferClient *fileTransfer() { return &files_; }
     void recordPaint();
     void setStatsFile(const QString &path) { statsFile_ = path; }
 signals:
     void status(QString text);
     void frame(QImage image);
     void capability(bool control);
+    void loginScreenCapability(bool enabled);
     void disconnected();
     void statistics(QString text);
     void decodeFrame(quint64 generation, QString codec, QByteArray bytes);
@@ -110,6 +122,8 @@ private:
     double decodeTotalMs_ = 0;
     QElapsedTimer lastMessage_;
     bool ready_ = false;
+    bool control_ = false, loginScreen_ = false, wakePending_ = false;
+    FileTransferClient files_;
 };
 class Viewer : public QWidget {
     Q_OBJECT
@@ -145,16 +159,22 @@ public:
     Viewer *viewer() const { return viewer_; }
     void setStatus(const QString &text);
     void setStatistics(const QString &text);
+    void setLoginScreenCapability(bool enabled);
+    void setFileCapability(bool enabled);
     void sessionEnded();
 signals:
     void disconnectRequested();
     void releaseRequested();
+    void wakeRequested();
+    void filesRequested();
 protected:
     void closeEvent(QCloseEvent *event) override;
 private:
     Viewer *viewer_;
     QLabel *status_;
     QLabel *performance_;
+    QPushButton *wakeButton_;
+    QPushButton *filesButton_;
 };
 class Window : public QMainWindow {
     Q_OBJECT
@@ -164,6 +184,7 @@ public:
     bool startHost(const QString &bind = {}, quint16 port = DefaultPort, const QString &inviteFile = {});
     void setViewOnly() { allowControl_->setChecked(false); }
     void setLockOnDisconnect(bool enabled) { lockOnDisconnect_->setChecked(enabled); }
+    void configureFiles(const QString &directory, bool enabled);
     void connectFile(const QString &path);
     void configureVideo(int fps, const QString &codec);
     void setStatsFile(const QString &path) { client_.setStatsFile(path); }
@@ -184,5 +205,9 @@ private:
     QLabel *status_;
     QTabWidget *tabs_;
     std::unique_ptr<ControlWindow> controlWindow_;
+    std::unique_ptr<FileTransferDialog> fileWindow_;
+    QCheckBox *allowFiles_;
+    QLineEdit *fileDirectory_;
+    QPushButton *chooseFileDirectory_;
 };
 }

@@ -4,12 +4,35 @@
 #include <QBuffer>
 #include <QElapsedTimer>
 #include <QImageReader>
+#ifdef Q_OS_WIN
+#include "windows_bridge.h"
+#include <QThread>
+#endif
 
 namespace ld {
 CaptureWorker::CaptureWorker(QObject *parent) : QObject(parent) {}
 CaptureWorker::~CaptureWorker() = default;
-void CaptureWorker::produce(quint64 generation) {
+void CaptureWorker::produce(quint64 generation, bool useHelper) {
     if (generation != activeGeneration_.load(std::memory_order_relaxed)) return;
+#ifdef Q_OS_WIN
+    if (useHelper) {
+        // Desktop switches can briefly deny access while Winlogon changes
+        // surfaces. Retry for a bounded time; never use a different desktop.
+        QElapsedTimer clock; clock.start();
+        QImage image; QRect bounds; QString error;
+        for (;;) {
+            if (generation != activeGeneration_.load(std::memory_order_relaxed)) return;
+            if (windowsHelperCapture(image, bounds, error)) break;
+            if (clock.elapsed() >= 1500) { emit failed(generation, error); return; }
+            QThread::msleep(50);
+        }
+        if (generation == activeGeneration_.load(std::memory_order_relaxed))
+            emit captured(generation, image, bounds, clock.nsecsElapsed() / 1e6, QStringLiteral("Windows 登录辅助服务"));
+        return;
+    }
+#else
+    Q_UNUSED(useHelper);
+#endif
     if (!capture_ || generation != generation_) {
         generation_ = generation;
         capture_.reset(new ScreenCapture);
