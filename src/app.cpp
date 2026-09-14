@@ -33,6 +33,8 @@
 #include <QPixmap>
 #include <QStandardPaths>
 #include <QDir>
+#include <QSettings>
+#include <QSignalBlocker>
 #include <algorithm>
 
 namespace ld {
@@ -482,31 +484,101 @@ ControlWindow::ControlWindow() {
     QSize initialSize(1120, 760);
     if (auto *screen = QGuiApplication::primaryScreen()) initialSize = initialSize.boundedTo(screen->availableGeometry().size() * 0.9);
     resize(initialSize);
-    auto *root = new QWidget; auto *layout = new QVBoxLayout(root);
-    auto *actions = new QHBoxLayout;
+    auto *root = new QWidget; layout_ = new QVBoxLayout(root);
+    toolbar_ = new QWidget(root); toolbar_->setObjectName(QStringLiteral("controlToolbar"));
+    auto *actions = new QHBoxLayout(toolbar_); actions->setContentsMargins(0, 0, 0, 0);
     auto *disconnectButton = new QPushButton(QStringLiteral("断开连接"));
     auto *releaseButton = new QPushButton(QStringLiteral("释放远程按键"));
     wakeButton_ = new QPushButton(QStringLiteral("唤醒登录界面")); wakeButton_->setEnabled(false);
     wakeButton_->setToolTip(QStringLiteral("唤醒远程屏幕后，在系统登录界面输入密码或 PIN；不会跳过系统验证。"));
     filesButton_ = new QPushButton(QStringLiteral("文件传输")); filesButton_->setEnabled(false);
-    actions->addWidget(disconnectButton); actions->addWidget(releaseButton); actions->addWidget(wakeButton_); actions->addWidget(filesButton_); actions->addStretch();
-    layout->addLayout(actions);
-    viewer_ = new Viewer; layout->addWidget(viewer_, 1);
-    status_ = new QLabel; status_->setTextFormat(Qt::PlainText); status_->setWordWrap(true); layout->addWidget(status_);
-    performance_ = new QLabel; performance_->setWordWrap(true); layout->addWidget(performance_);
-    auto *hint = new QLabel(QStringLiteral("Ctrl + Alt + Shift + Esc 释放键盘；关闭此窗口会断开连接。"));
-    hint->setWordWrap(true); hint->setStyleSheet("color:#52677d"); layout->addWidget(hint);
+    cleanViewToggle_ = new QCheckBox(QStringLiteral("全屏仅画面"));
+    cleanViewToggle_->setObjectName(QStringLiteral("cleanViewToggle"));
+    cleanViewToggle_->setToolTip(QStringLiteral("全屏显示远程画面，隐藏标题栏、控制栏和状态信息；Ctrl + Alt + Shift + H 恢复窗口，也可在主窗口取消勾选。"));
+    actions->addWidget(disconnectButton); actions->addWidget(releaseButton); actions->addWidget(wakeButton_); actions->addWidget(filesButton_); actions->addStretch(); actions->addWidget(cleanViewToggle_);
+    layout_->addWidget(toolbar_);
+    viewer_ = new Viewer; layout_->addWidget(viewer_, 1);
+    information_ = new QWidget(root); information_->setObjectName(QStringLiteral("controlInformation"));
+    auto *details = new QVBoxLayout(information_); details->setContentsMargins(0, 0, 0, 0);
+    status_ = new QLabel; status_->setTextFormat(Qt::PlainText); status_->setWordWrap(true); details->addWidget(status_);
+    performance_ = new QLabel; performance_->setWordWrap(true); details->addWidget(performance_);
+    auto *hint = new QLabel(QStringLiteral("Ctrl + Alt + Shift + H 切换全屏仅画面；Ctrl + Alt + Shift + Esc 释放键盘；Ctrl + Alt + Shift + D 断开。"));
+    hint->setWordWrap(true); hint->setStyleSheet("color:#52677d"); details->addWidget(hint);
+    layout_->addWidget(information_);
     setCentralWidget(root);
+    normalMargins_ = layout_->contentsMargins(); normalSpacing_ = layout_->spacing();
+    connect(cleanViewToggle_, &QCheckBox::toggled, this, &ControlWindow::setCleanView);
+    qApp->installEventFilter(this);
     connect(disconnectButton, &QPushButton::clicked, this, &ControlWindow::disconnectRequested);
     connect(releaseButton, &QPushButton::clicked, this, &ControlWindow::releaseRequested);
     connect(wakeButton_, &QPushButton::clicked, this, [this] { emit wakeRequested(); viewer_->setFocus(); });
     connect(filesButton_, &QPushButton::clicked, this, &ControlWindow::filesRequested);
 }
+bool ControlWindow::eventFilter(QObject *watched, QEvent *event) {
+    const auto type = event->type();
+    if (type != QEvent::ShortcutOverride && type != QEvent::KeyPress && type != QEvent::KeyRelease)
+        return QMainWindow::eventFilter(watched, event);
+    auto *widget = qobject_cast<QWidget *>(watched);
+    if (!widget || widget->window() != this) return QMainWindow::eventFilter(watched, event);
+    auto *key = static_cast<QKeyEvent *>(event);
+    const auto modifiers = Qt::ControlModifier | Qt::AltModifier | Qt::ShiftModifier;
+    const bool command = (key->key() == Qt::Key_H || key->key() == Qt::Key_D)
+        && (key->modifiers() & modifiers) == modifiers;
+    if (type == QEvent::ShortcutOverride && command) { key->accept(); return true; }
+    if (type == QEvent::KeyPress && command) {
+        if (!key->isAutoRepeat()) {
+            localShortcutKeys_.insert(key->key());
+            if (key->key() == Qt::Key_H) setCleanView(!cleanView_);
+            else { emit releaseRequested(); emit disconnectRequested(); }
+        }
+        key->accept(); return true;
+    }
+    // A local shortcut must not send an unmatched key-up to the remote PC.
+    if (type == QEvent::KeyRelease && localShortcutKeys_.contains(key->key())) {
+        if (!key->isAutoRepeat()) localShortcutKeys_.remove(key->key());
+        key->accept(); return true;
+    }
+    if (type == QEvent::KeyPress) localShortcutKeys_.remove(key->key());
+    return QMainWindow::eventFilter(watched, event);
+}
+void ControlWindow::setCleanView(bool enabled) {
+    if (cleanView_ == enabled) return;
+    // Modifiers may already have reached the remote desktop before the local
+    // shortcut was recognized. Release them before changing the layout.
+    emit releaseRequested();
+    const bool wasVisible = isVisible();
+    const bool wasActive = isActiveWindow();
+    if (enabled) {
+        windowedGeometry_ = normalGeometry().isValid() ? normalGeometry() : geometry();
+        windowedState_ = windowState() & ~(Qt::WindowFullScreen | Qt::WindowMinimized);
+    }
+    cleanView_ = enabled;
+    const QSignalBlocker blocker(cleanViewToggle_);
+    cleanViewToggle_->setChecked(enabled);
+    toolbar_->setVisible(!enabled); information_->setVisible(!enabled);
+    layout_->setContentsMargins(enabled ? QMargins() : normalMargins_);
+    layout_->setSpacing(enabled ? 0 : normalSpacing_);
+    if (enabled) {
+        if (wasVisible) showFullScreen();
+        else setWindowState(Qt::WindowFullScreen);
+    } else {
+        // Restore client geometry directly without unmapping the active window
+        // or applying platform-specific title-bar offsets from saveGeometry.
+        setWindowState(Qt::WindowNoState);
+        setGeometry(windowedGeometry_);
+        setWindowState(windowedState_);
+    }
+    if (wasVisible) {
+        if (wasActive) { raise(); activateWindow(); }
+        viewer_->setFocus(Qt::OtherFocusReason);
+    }
+    emit cleanViewChanged(enabled);
+}
 void ControlWindow::setStatus(const QString &text) { status_->setText(text); }
 void ControlWindow::setStatistics(const QString &text) { performance_->setText(text); }
 void ControlWindow::setLoginScreenCapability(bool enabled) { wakeButton_->setEnabled(enabled); }
 void ControlWindow::setFileCapability(bool enabled) { filesButton_->setEnabled(enabled); }
-void ControlWindow::sessionEnded() { viewer_->reset(); wakeButton_->setEnabled(false); filesButton_->setEnabled(false); performance_->clear(); hide(); }
+void ControlWindow::sessionEnded() { localShortcutKeys_.clear(); viewer_->reset(); wakeButton_->setEnabled(false); filesButton_->setEnabled(false); performance_->clear(); hide(); }
 void ControlWindow::closeEvent(QCloseEvent *event) { emit disconnectRequested(); event->accept(); }
 
 Window::Window() : host_(this), client_(this), controlWindow_(std::make_unique<ControlWindow>()) {
@@ -581,6 +653,18 @@ Window::Window() : host_(this), client_(this), controlWindow_(std::make_unique<C
     connectCode_ = new QPlainTextEdit; connectCode_->setPlaceholderText(QStringLiteral("粘贴另一台电脑生成的 landesk1: 连接码")); connectCode_->setMinimumHeight(44); connectCode_->setMaximumHeight(100); viewLayout->addWidget(connectCode_);
     auto *actions = new QHBoxLayout; auto *connectButton = new QPushButton(QStringLiteral("连接")); auto *disconnectButton = new QPushButton(QStringLiteral("断开"));
     actions->addWidget(connectButton); actions->addWidget(disconnectButton); actions->addStretch(); viewLayout->addLayout(actions);
+    auto *cleanView = new QCheckBox(QStringLiteral("全屏仅显示远程画面（隐藏标题栏、控制栏和状态信息）"));
+    cleanView->setObjectName(QStringLiteral("cleanViewPreference"));
+    cleanView->setToolTip(QStringLiteral("控制窗口中按 Ctrl + Alt + Shift + H 恢复窗口；Ctrl + Alt + Shift + D 断开连接。"));
+    cleanView->setChecked(QSettings(QSettings::IniFormat, QSettings::UserScope, "bananaDesk", "bananaDesk").value(QStringLiteral("viewer/cleanView"), false).toBool());
+    controlWindow_->setCleanView(cleanView->isChecked());
+    connect(cleanView, &QCheckBox::toggled, controlWindow_.get(), &ControlWindow::setCleanView);
+    connect(controlWindow_.get(), &ControlWindow::cleanViewChanged, this, [cleanView](bool enabled) {
+        const QSignalBlocker blocker(cleanView);
+        cleanView->setChecked(enabled);
+        QSettings(QSettings::IniFormat, QSettings::UserScope, "bananaDesk", "bananaDesk").setValue(QStringLiteral("viewer/cleanView"), enabled);
+    });
+    viewLayout->addWidget(cleanView);
     auto *hint = new QLabel(QStringLiteral("连接成功后，远程画面会在独立控制窗口中打开。可拖动窗口边缘调整大小，或双击标题栏最大化。两端使用新版并允许键鼠控制时，连接后复制文字即可跨端粘贴，剪贴板自动双向同步。")); hint->setWordWrap(true); viewLayout->addWidget(hint); viewLayout->addStretch();
     tabs_->addTab(viewPage, QStringLiteral("连接远程桌面"));
     status_ = new QLabel(QStringLiteral("尚未共享或连接")); status_->setTextFormat(Qt::PlainText); status_->setWordWrap(true); status_->setStyleSheet("padding:9px;background:#edf3f8;color:#16324f;border-radius:5px"); layout->addWidget(status_);

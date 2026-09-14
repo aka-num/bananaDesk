@@ -19,6 +19,7 @@
 #include <QTabWidget>
 #include <QSet>
 #include <QThread>
+#include <QVBoxLayout>
 #include <memory>
 
 namespace ld {
@@ -165,20 +166,34 @@ public:
     void setStatistics(const QString &text);
     void setLoginScreenCapability(bool enabled);
     void setFileCapability(bool enabled);
+    void setCleanView(bool enabled);
+    bool cleanView() const { return cleanView_; }
     void sessionEnded();
 signals:
     void disconnectRequested();
     void releaseRequested();
     void wakeRequested();
     void filesRequested();
+    void cleanViewChanged(bool enabled);
 protected:
     void closeEvent(QCloseEvent *event) override;
+    bool eventFilter(QObject *watched, QEvent *event) override;
 private:
     Viewer *viewer_;
     QLabel *status_;
     QLabel *performance_;
     QPushButton *wakeButton_;
     QPushButton *filesButton_;
+    QWidget *toolbar_;
+    QWidget *information_;
+    QCheckBox *cleanViewToggle_;
+    QVBoxLayout *layout_;
+    QMargins normalMargins_;
+    int normalSpacing_ = 0;
+    bool cleanView_ = false;
+    QRect windowedGeometry_;
+    Qt::WindowStates windowedState_;
+    QSet<int> localShortcutKeys_;
 };
 class Window : public QMainWindow {
     Q_OBJECT
