@@ -5,6 +5,24 @@
 class InteractionTest : public QObject {
     Q_OBJECT
 private slots:
+    void cancelledVideoJobs() {
+        ld::CaptureWorker capture;
+        ld::EncodeWorker encoder;
+        ld::DecodeWorker decoder;
+        QSignalSpy captureErrors(&capture, &ld::CaptureWorker::failed);
+        QSignalSpy encodeErrors(&encoder, &ld::EncodeWorker::failed);
+        QSignalSpy decodeErrors(&decoder, &ld::DecodeWorker::failed);
+        capture.activate(2); encoder.activate(2); decoder.activate(2);
+        capture.produce(1);
+        encoder.encode(1, QImage(), QRect(), "jpeg", 60, 0, "test");
+        decoder.decode(1, "jpeg", QByteArray("invalid"));
+        QCOMPARE(captureErrors.count(), 0); QCOMPARE(encodeErrors.count(), 0); QCOMPARE(decodeErrors.count(), 0);
+        // Initial generation zero must initialize safely rather than dereference null.
+        encoder.activate(0); decoder.activate(0);
+        encoder.encode(0, QImage(), QRect(), "jpeg", 60, 0, "test");
+        decoder.decode(0, "jpeg", QByteArray("invalid"));
+        QCOMPARE(encodeErrors.count(), 1); QCOMPARE(decodeErrors.count(), 1);
+    }
     void invitationValidation() {
         ld::Invitation source{"192.168.1.25", 24832, QString(64, 'a'), QString(48, 'b')}, result;
         QString error;
