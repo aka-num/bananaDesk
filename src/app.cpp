@@ -20,7 +20,6 @@
 #include <QKeyEvent>
 #include <QWheelEvent>
 #include <QCloseEvent>
-#include <QClipboard>
 #include <QSaveFile>
 #include <QMessageBox>
 #include <QStatusBar>
@@ -41,13 +40,18 @@ static QSslConfiguration tlsConfig() {
     config.setProtocol(QSsl::TlsV1_2OrLater);
     return config;
 }
-Host::Host(QObject *parent) : QObject(parent), server_(this), files_(this) {
+Host::Host(QObject *parent) : QObject(parent), server_(this), files_(this), clipboard_(this) {
     connect(&server_, &Listener::accepted, this, &Host::accept);
     connect(&files_, &FileTransferHost::send, this, [this](const QByteArray &payload) {
         if (authenticated_ && filesAllowed_ && wire_ && !wire_->send(Packet::File, payload))
             drop(QStringLiteral("文件传输发送失败"));
     });
     connect(&files_, &FileTransferHost::status, this, &Host::status);
+    connect(&clipboard_, &ClipboardSync::send, this, [this](const QByteArray &payload) {
+        if (authenticated_ && clipboardAllowed_ && wire_ && !wire_->send(Packet::Clipboard, payload))
+            drop(QStringLiteral("剪贴板发送失败"));
+    });
+    connect(&clipboard_, &ClipboardSync::status, this, &Host::status);
     timer_.setTimerType(Qt::PreciseTimer);
     timer_.setInterval(2);
     connect(&timer_, &QTimer::timeout, this, &Host::tick);
@@ -118,6 +122,7 @@ void Host::releaseInput() {
 }
 void Host::drop(const QString &reason) {
     const bool shouldLock = authenticated_ && lockOnDisconnect_;
+    clipboard_.setEnabled(false); clipboardAllowed_ = false;
     ++generation_;
     worker_->activate(generation_); encoder_->activate(generation_);
     releaseInput();
@@ -154,7 +159,7 @@ void Host::accept(qintptr descriptor) {
 }
 void Host::receive(Packet type, const QByteArray &payload) {
     if (!socket_ || !socket_->isEncrypted()) { drop(QStringLiteral("TLS 未就绪")); return; }
-    if (type != Packet::File && payload.size() > 4095) { drop(QStringLiteral("控制消息长度超限")); return; }
+    if (type != Packet::File && type != Packet::Clipboard && payload.size() > 4095) { drop(QStringLiteral("控制消息长度超限")); return; }
     if (packetWindow_.elapsed() >= 1000) { packetWindow_.restart(); packets_ = 0; }
     if (++packets_ > 1000) { drop(QStringLiteral("输入消息速率超限")); return; }
     if (!authenticated_) {
@@ -171,7 +176,8 @@ void Host::receive(Packet type, const QByteArray &payload) {
         windowsHelperSetEnabled(helperMode_);
 #endif
         authenticated_ = true; lastMessage_.restart(); frameClock_.start(); nextFrameNs_ = 0;
-        if (filesAllowed_) wire_->setReceiveLimit(MaxFilePayload + 1);
+        clipboardAllowed_ = control_ && o.value("clipboard").toBool(false);
+        if (filesAllowed_ || clipboardAllowed_) wire_->setReceiveLimit(qMax(MaxFilePayload, MaxClipboardBytes) + 1);
         emit status(QStringLiteral("已连接：%1 · %2").arg(socket_->peerAddress().toString(), control_ ? QStringLiteral("允许键鼠控制") : QStringLiteral("仅观看")));
         capture(); return;
     }
@@ -180,6 +186,9 @@ void Host::receive(Packet type, const QByteArray &payload) {
     else if (type == Packet::Ack && payload.isEmpty() && inFlight_ > 0) { --inFlight_; tick(); }
     else if (type == Packet::Release && payload.isEmpty()) releaseInput();
     else if (type == Packet::File && filesAllowed_) files_.receive(payload);
+    else if (type == Packet::Clipboard && clipboardAllowed_ && clipboard_.enabled()) {
+        if (!clipboard_.receive(payload)) drop(QStringLiteral("剪贴板消息无效"));
+    }
     else if (type == Packet::Wake && control_ && loginScreen_ && payload.isEmpty()) {
         if (wakeClock_.isValid() && wakeClock_.elapsed() < 1000) {
             wire_->send(Packet::Wake, json({{"ok", false}, {"error", QStringLiteral("请稍后再唤醒")}})); return;
@@ -226,7 +235,11 @@ void Host::encoded(quint64 generation, QRect bounds, QByteArray bytes, QString c
     --encodeQueued_;
     if (bounds != screen_) {
         releaseInput(); screen_ = bounds;
-        wire_->send(Packet::Welcome, json({{"v", 1}, {"width", screen_.width()}, {"height", screen_.height()}, {"control", control_}, {"login_screen", loginScreen_}, {"file_transfer", filesAllowed_}, {"codec", codec}, {"fps", targetFps_}, {"window", frameWindow_}}));
+        if (!wire_->send(Packet::Welcome, json({{"v", 1}, {"width", screen_.width()}, {"height", screen_.height()}, {"control", control_}, {"login_screen", loginScreen_}, {"file_transfer", filesAllowed_}, {"clipboard", clipboardAllowed_}, {"codec", codec}, {"fps", targetFps_}, {"window", frameWindow_}}))) {
+            drop(QStringLiteral("发送桌面信息失败")); return;
+        }
+        // Start watching only after Welcome is queued, so text cannot precede negotiation.
+        clipboard_.setEnabled(clipboardAllowed_);
         qInfo().noquote() << QStringLiteral("视频：%1 · %2 · 目标 %3 fps · 首帧采集 %4 ms / 编码 %5 ms").arg(backend, codec).arg(targetFps_).arg(captureMs, 0, 'f', 1).arg(encodeMs, 0, 'f', 1);
     }
     if (!wire_->send(Packet::Image, bytes)) { drop(QStringLiteral("发送画面失败")); return; }
@@ -234,11 +247,16 @@ void Host::encoded(quint64 generation, QRect bounds, QByteArray bytes, QString c
     tick();
 }
 
-Client::Client(QObject *parent) : QObject(parent), files_(this) {
+Client::Client(QObject *parent) : QObject(parent), files_(this), clipboard_(this) {
     connect(&files_, &FileTransferClient::send, this, [this](const QByteArray &payload) {
         if (ready_ && files_.available() && wire_ && !wire_->send(Packet::File, payload))
             fail(QStringLiteral("文件传输发送失败"));
     });
+    connect(&clipboard_, &ClipboardSync::send, this, [this](const QByteArray &payload) {
+        if (ready_ && control_ && wire_ && !wire_->send(Packet::Clipboard, payload))
+            fail(QStringLiteral("剪贴板发送失败"));
+    });
+    connect(&clipboard_, &ClipboardSync::status, this, &Client::status);
     timer_.setInterval(2000);
     connect(&timer_, &QTimer::timeout, this, [this] {
         if (!socket_) return;
@@ -266,6 +284,7 @@ Client::Client(QObject *parent) : QObject(parent), files_(this) {
 }
 Client::~Client() { stop(); decodeThread_.quit(); decodeThread_.wait(); }
 void Client::stop() {
+    clipboard_.setEnabled(false);
     if (ready_) reportStats();
     release(); ready_ = false; control_ = loginScreen_ = wakePending_ = false; timer_.stop();
     files_.setAvailable(false); files_.reset();
@@ -304,7 +323,7 @@ void Client::start(const Invitation &invitation) {
         socket_->setSocketOption(QAbstractSocket::LowDelayOption, 1);
         QJsonArray codecs; codecs.append("jpeg");
         if (VideoDecoder::available()) codecs.append("h264");
-        wire_->send(Packet::Auth, json({{"v", 1}, {"token", invitation_.token}, {"codecs", codecs}, {"window", 3}}));
+        wire_->send(Packet::Auth, json({{"v", 1}, {"token", invitation_.token}, {"codecs", codecs}, {"window", 3}, {"clipboard", true}}));
         emit status(QStringLiteral("TLS 身份已核验，正在验证连接码"));
     });
     connect(socket_, &QSslSocket::disconnected, this, [this] { fail(QStringLiteral("连接已结束")); });
@@ -334,13 +353,16 @@ void Client::receive(Packet type, const QByteArray &payload) {
         loginScreen_ = control_ && o.value("login_screen").toBool(false);
         ready_ = true; emit capability(control_); emit loginScreenCapability(loginScreen_);
         files_.setAvailable(control_ && o.value("file_transfer").toBool(false));
-        emit status(QStringLiteral("已连接 · %1 × %2 · %3").arg(o.value("width").toInt()).arg(o.value("height").toInt()).arg(o.value("control").toBool() ? QStringLiteral("可控制") : QStringLiteral("仅观看")));
+        clipboard_.setEnabled(control_ && o.value("clipboard").toBool(false));
+        emit status(QStringLiteral("已连接 · %1 × %2 · %3").arg(o.value("width").toInt()).arg(o.value("height").toInt()).arg(control_ ? (clipboard_.enabled() ? QStringLiteral("可控制 · 剪贴板自动同步") : QStringLiteral("可控制")) : QStringLiteral("仅观看")));
     } else if (type == Packet::Image && ready_) {
         if (++queuedDecode_ > frameWindow_) { fail(QStringLiteral("远端视频超出接收窗口")); return; }
         ++receivedFrames_; receivedBytes_ += quint64(payload.size());
         emit decodeFrame(generation_, codec_, payload);
     } else if (type == Packet::File && ready_ && files_.available() && payload.size() <= MaxFilePayload) {
         files_.receive(payload);
+    } else if (type == Packet::Clipboard && ready_ && control_ && clipboard_.enabled()) {
+        if (!clipboard_.receive(payload)) fail(QStringLiteral("远端剪贴板消息无效"));
     } else if (type == Packet::Wake && ready_ && wakePending_) {
         QJsonObject o;
         if (!object(payload, o) || !o.value("ok").isBool() || payload.size() > 4096) { fail(QStringLiteral("唤醒响应无效")); return; }
@@ -519,6 +541,7 @@ Window::Window() : host_(this), client_(this), controlWindow_(std::make_unique<C
     codec_->addItem(QStringLiteral("JPEG（兼容模式）"), "jpeg");
     form->addRow(QStringLiteral("目标帧率"), fps_); form->addRow(QStringLiteral("视频编码"), codec_);
     allowControl_ = new QCheckBox(QStringLiteral("允许对方操作键盘和鼠标")); allowControl_->setChecked(true); shareLayout->addWidget(allowControl_);
+    allowControl_->setToolTip(QStringLiteral("允许控制时，同时自动双向同步连接后复制的文字"));
     allowFiles_ = new QCheckBox(QStringLiteral("允许传输下列文件夹中的文件（需允许键鼠控制）")); allowFiles_->setChecked(true); shareLayout->addWidget(allowFiles_);
     auto *filePathRow = new QHBoxLayout;
     fileDirectory_ = new QLineEdit; fileDirectory_->setReadOnly(true);
@@ -552,7 +575,7 @@ Window::Window() : host_(this), client_(this), controlWindow_(std::make_unique<C
     connectCode_ = new QPlainTextEdit; connectCode_->setPlaceholderText(QStringLiteral("粘贴另一台电脑生成的 landesk1: 连接码")); connectCode_->setMinimumHeight(44); connectCode_->setMaximumHeight(100); viewLayout->addWidget(connectCode_);
     auto *actions = new QHBoxLayout; auto *connectButton = new QPushButton(QStringLiteral("连接")); auto *disconnectButton = new QPushButton(QStringLiteral("断开"));
     actions->addWidget(connectButton); actions->addWidget(disconnectButton); actions->addStretch(); viewLayout->addLayout(actions);
-    auto *hint = new QLabel(QStringLiteral("连接成功后，远程画面会在独立控制窗口中打开。可拖动窗口边缘调整大小，或双击标题栏最大化。")); hint->setWordWrap(true); viewLayout->addWidget(hint); viewLayout->addStretch();
+    auto *hint = new QLabel(QStringLiteral("连接成功后，远程画面会在独立控制窗口中打开。可拖动窗口边缘调整大小，或双击标题栏最大化。两端使用新版并允许键鼠控制时，连接后复制文字即可跨端粘贴，剪贴板自动双向同步。")); hint->setWordWrap(true); viewLayout->addWidget(hint); viewLayout->addStretch();
     tabs_->addTab(viewPage, QStringLiteral("连接远程桌面"));
     status_ = new QLabel(QStringLiteral("尚未共享或连接")); status_->setTextFormat(Qt::PlainText); status_->setWordWrap(true); status_->setStyleSheet("padding:9px;background:#edf3f8;color:#16324f;border-radius:5px"); layout->addWidget(status_);
     setCentralWidget(root);
@@ -560,7 +583,7 @@ Window::Window() : host_(this), client_(this), controlWindow_(std::make_unique<C
         if (host_.running()) { host_.stop(); invitation_->clear(); share_->setText(QStringLiteral("开始共享")); addresses_->setEnabled(true); port_->setEnabled(true); allowControl_->setEnabled(true); allowFiles_->setEnabled(true); chooseFileDirectory_->setEnabled(true); fps_->setEnabled(true); codec_->setEnabled(true); showStatus(QStringLiteral("共享已停止，连接码已撤销")); }
         else startHost(addresses_->currentText(), quint16(port_->value()));
     });
-    connect(copy, &QPushButton::clicked, this, [this] { if (!invitation_->toPlainText().isEmpty()) QApplication::clipboard()->setText(invitation_->toPlainText()); });
+    connect(copy, &QPushButton::clicked, this, [this] { if (!invitation_->toPlainText().isEmpty()) ClipboardSync::setLocalOnlyText(invitation_->toPlainText()); });
     connect(connectButton, &QPushButton::clicked, this, &Window::connectCode);
     connect(disconnectButton, &QPushButton::clicked, this, [this] { client_.stop(); showStatus(QStringLiteral("已断开")); });
     connect(controlWindow_.get(), &ControlWindow::disconnectRequested, this, [this] { client_.stop(); showStatus(QStringLiteral("已断开")); });

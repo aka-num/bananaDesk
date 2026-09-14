@@ -3,6 +3,7 @@
 #include "native_input.h"
 #include "video_pipeline.h"
 #include "file_transfer.h"
+#include "clipboard_sync.h"
 #include <QMainWindow>
 #include <QTcpServer>
 #include <QTimer>
@@ -78,6 +79,8 @@ private:
     QElapsedTimer wakeClock_;
     QRect screen_;
     FileTransferHost files_;
+    ClipboardSync clipboard_;
+    bool clipboardAllowed_ = false;
     QString fileRoot_;
     bool filesEnabled_ = false, filesAllowed_ = false;
 };
@@ -124,6 +127,7 @@ private:
     bool ready_ = false;
     bool control_ = false, loginScreen_ = false, wakePending_ = false;
     FileTransferClient files_;
+    ClipboardSync clipboard_;
 };
 class Viewer : public QWidget {
     Q_OBJECT
