@@ -35,6 +35,7 @@
 #include <QDir>
 #include <QSettings>
 #include <QSignalBlocker>
+#include <QProgressBar>
 #include <algorithm>
 
 namespace ld {
@@ -132,7 +133,8 @@ void Host::drop(const QString &reason) {
     ++generation_;
     worker_->activate(generation_); encoder_->activate(generation_);
     releaseInput();
-    files_.reset();
+    fileOffersAllowed_ = false;
+    files_.reset(); // Local teardown must not try to send on the closing socket.
 #ifdef Q_OS_WIN
     windowsHelperSetEnabled(false);
 #endif
@@ -184,6 +186,7 @@ void Host::receive(Packet type, const QByteArray &payload) {
 #endif
         authenticated_ = true; lastMessage_.restart(); frameClock_.start(); nextFrameNs_ = 0;
         clipboardAllowed_ = control_ && o.value("clipboard").toBool(false);
+        fileOffersAllowed_ = filesAllowed_ && o.value("file_offer").toBool(false);
         if (filesAllowed_ || clipboardAllowed_) wire_->setReceiveLimit(qMax(MaxFilePayload, MaxClipboardBytes) + 1);
         emit status(QStringLiteral("已连接：%1 · %2").arg(socket_->peerAddress().toString(), control_ ? QStringLiteral("允许键鼠控制") : QStringLiteral("仅观看")));
         capture(); return;
@@ -242,11 +245,13 @@ void Host::encoded(quint64 generation, QRect bounds, QByteArray bytes, QString c
     --encodeQueued_;
     if (bounds != screen_) {
         releaseInput(); screen_ = bounds;
-        if (!wire_->send(Packet::Welcome, json({{"v", 1}, {"width", screen_.width()}, {"height", screen_.height()}, {"control", control_}, {"login_screen", loginScreen_}, {"file_transfer", filesAllowed_}, {"clipboard", clipboardAllowed_}, {"codec", codec}, {"fps", targetFps_}, {"window", frameWindow_}}))) {
+        if (!wire_->send(Packet::Welcome, json({{"v", 1}, {"width", screen_.width()}, {"height", screen_.height()}, {"control", control_}, {"login_screen", loginScreen_}, {"file_transfer", filesAllowed_}, {"file_offer", fileOffersAllowed_}, {"clipboard", clipboardAllowed_}, {"codec", codec}, {"fps", targetFps_}, {"window", frameWindow_}}))) {
             drop(QStringLiteral("发送桌面信息失败")); return;
         }
         // Start watching only after Welcome is queued, so text cannot precede negotiation.
         clipboard_.setEnabled(clipboardAllowed_);
+        // An offer must follow Welcome so the client has negotiated permission.
+        files_.setOfferAvailable(fileOffersAllowed_);
         qInfo().noquote() << QStringLiteral("视频：%1 · %2 · 目标 %3 fps · 首帧采集 %4 ms / 编码 %5 ms").arg(backend, codec).arg(targetFps_).arg(captureMs, 0, 'f', 1).arg(encodeMs, 0, 'f', 1);
     }
     if (!wire_->send(Packet::Image, bytes)) { drop(QStringLiteral("发送画面失败")); return; }
@@ -294,7 +299,7 @@ void Client::stop() {
     clipboard_.setEnabled(false);
     if (ready_) reportStats();
     release(); ready_ = false; control_ = loginScreen_ = wakePending_ = false; timer_.stop();
-    files_.setAvailable(false); files_.reset();
+    files_.setOfferAvailable(false); files_.setAvailable(false); files_.reset();
     emit loginScreenCapability(false);
     statsTimer_.stop(); ++generation_; queuedDecode_ = 0;
     decoder_->activate(generation_);
@@ -331,7 +336,7 @@ void Client::start(const Invitation &invitation) {
         socket_->setSocketOption(QAbstractSocket::LowDelayOption, 1);
         QJsonArray codecs; codecs.append("jpeg");
         if (VideoDecoder::available()) codecs.append("h264");
-        wire_->send(Packet::Auth, json({{"v", 1}, {"token", invitation_.token}, {"codecs", codecs}, {"window", 3}, {"clipboard", true}}));
+        wire_->send(Packet::Auth, json({{"v", 1}, {"token", invitation_.token}, {"codecs", codecs}, {"window", 3}, {"clipboard", true}, {"file_offer", true}}));
         emit status(QStringLiteral("TLS 身份已核验，正在验证连接码"));
     });
     connect(socket_, &QSslSocket::disconnected, this, [this] { fail(QStringLiteral("连接已结束")); });
@@ -361,6 +366,7 @@ void Client::receive(Packet type, const QByteArray &payload) {
         loginScreen_ = control_ && o.value("login_screen").toBool(false);
         ready_ = true; emit capability(control_); emit loginScreenCapability(loginScreen_);
         files_.setAvailable(control_ && o.value("file_transfer").toBool(false));
+        files_.setOfferAvailable(files_.available() && o.value("file_offer").toBool(false));
         clipboard_.setEnabled(control_ && o.value("clipboard").toBool(false));
         emit status(QStringLiteral("已连接 · %1 × %2 · %3").arg(o.value("width").toInt()).arg(o.value("height").toInt()).arg(control_ ? (clipboard_.enabled() ? QStringLiteral("可控制 · 剪贴板自动同步") : QStringLiteral("可控制")) : QStringLiteral("仅观看")));
     } else if (type == Packet::Image && ready_) {
@@ -620,7 +626,9 @@ Window::Window() : host_(this), client_(this), controlWindow_(std::make_unique<C
     form->addRow(QStringLiteral("目标帧率"), fps_); form->addRow(QStringLiteral("视频编码"), codec_);
     allowControl_ = new QCheckBox(QStringLiteral("允许对方操作键盘和鼠标")); allowControl_->setChecked(true); shareLayout->addWidget(allowControl_);
     allowControl_->setToolTip(QStringLiteral("允许控制时，同时自动双向同步连接后复制的文字"));
-    allowFiles_ = new QCheckBox(QStringLiteral("允许传输下列文件夹中的文件（需允许键鼠控制）")); allowFiles_->setChecked(true); shareLayout->addWidget(allowFiles_);
+    allowFiles_ = new QCheckBox(QStringLiteral("允许文件传输（需允许键鼠控制）")); allowFiles_->setChecked(true); shareLayout->addWidget(allowFiles_);
+    auto *fileHint = new QLabel(QStringLiteral("对方上传和下载使用下列共享文件夹；你也可以主动选择其他位置的文件发送给对方。"));
+    fileHint->setWordWrap(true); shareLayout->addWidget(fileHint);
     auto *filePathRow = new QHBoxLayout;
     fileDirectory_ = new QLineEdit; fileDirectory_->setReadOnly(true);
     QString downloadDir = QStandardPaths::writableLocation(QStandardPaths::DownloadLocation);
@@ -633,6 +641,37 @@ Window::Window() : host_(this), client_(this), controlWindow_(std::make_unique<C
         const QString path = QFileDialog::getExistingDirectory(this, QStringLiteral("选择允许远程传输的文件夹"), fileDirectory_->text());
         if (!path.isEmpty()) fileDirectory_->setText(path);
     });
+    auto *sendFileRow = new QHBoxLayout;
+    sendHostFile_ = new QPushButton(QStringLiteral("发送文件给控制端")); sendHostFile_->setObjectName(QStringLiteral("sendHostFile"));
+    cancelHostFile_ = new QPushButton(QStringLiteral("取消发送")); cancelHostFile_->setObjectName(QStringLiteral("cancelHostFile"));
+    sendFileRow->addWidget(sendHostFile_); sendFileRow->addWidget(cancelHostFile_); sendFileRow->addStretch(); shareLayout->addLayout(sendFileRow);
+    hostFileProgress_ = new QProgressBar; hostFileProgress_->setObjectName(QStringLiteral("hostFileProgress"));
+    hostFileProgress_->setRange(0, 1000); hostFileProgress_->setValue(0); shareLayout->addWidget(hostFileProgress_);
+    hostFileStatus_ = new QLabel(QStringLiteral("主动发送需要控制端连接，并且双方都使用 0.7.3 或更新版本。"));
+    hostFileStatus_->setObjectName(QStringLiteral("hostFileStatus")); hostFileStatus_->setTextFormat(Qt::PlainText);
+    hostFileStatus_->setWordWrap(true); hostFileStatus_->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+    shareLayout->addWidget(hostFileStatus_);
+    connect(sendHostFile_, &QPushButton::clicked, this, &Window::chooseHostFile);
+    connect(cancelHostFile_, &QPushButton::clicked, host_.fileTransfer(), &FileTransferHost::cancelOffer);
+    connect(host_.fileTransfer(), &FileTransferHost::offerAvailableChanged, this, [this](bool available) {
+        if (!available && hostFileDialog_) hostFileDialog_->reject();
+        hostFileStatus_->setText(available ? QStringLiteral("可主动选择文件发送，对方确认保存位置后开始传输。")
+                                         : QStringLiteral("主动发送需要控制端连接，并且双方都使用 0.7.3 或更新版本。"));
+        updateHostFileActions();
+    });
+    connect(host_.fileTransfer(), &FileTransferHost::busyChanged, this, [this](bool busy) {
+        if (busy && host_.fileTransfer()->offering()) hostFileProgress_->setRange(0, 0);
+        else if (hostFileProgress_->maximum() == 0) { hostFileProgress_->setRange(0, 1000); hostFileProgress_->setValue(0); }
+        updateHostFileActions();
+    });
+    connect(host_.fileTransfer(), &FileTransferHost::status, this, [this](const QString &text) {
+        hostFileStatus_->setText(text); updateHostFileActions();
+    });
+    connect(host_.fileTransfer(), &FileTransferHost::progress, this, [this](qint64 done, qint64 total) {
+        hostFileProgress_->setRange(0, 1000);
+        hostFileProgress_->setValue(total > 0 ? int(qBound<long double>(0, static_cast<long double>(done) * 1000 / total, 1000)) : 1000);
+    });
+    updateHostFileActions();
     lockOnDisconnect_ = new QCheckBox(QStringLiteral("远程会话断开后自动锁定本机")); lockOnDisconnect_->setChecked(true); shareLayout->addWidget(lockOnDisconnect_);
 #ifdef Q_OS_WIN
     auto *lockHint = new QLabel(QStringLiteral("远程解锁需先在本机安装运行包中的登录辅助服务，再启动共享；通过系统登录画面输入密码或 PIN。"));
@@ -686,6 +725,10 @@ Window::Window() : host_(this), client_(this), controlWindow_(std::make_unique<C
         if (!client_.fileTransfer()->busy()) client_.fileTransfer()->refresh();
     });
     connect(&client_, &Client::disconnected, fileWindow_.get(), &QWidget::hide);
+    connect(client_.fileTransfer(), &FileTransferClient::offered, this, &Window::receiveFileOffer);
+    connect(client_.fileTransfer(), &FileTransferClient::busyChanged, this, [this](bool busy) {
+        if (!busy && incomingFileDialog_) incomingFileDialog_->reject();
+    });
     connect(lockOnDisconnect_, &QCheckBox::toggled, &host_, &Host::setLockOnDisconnect);
     connect(&host_, &Host::desktopLockRequested, this, [this] {
         QString error;
@@ -707,6 +750,55 @@ Window::Window() : host_(this), client_(this), controlWindow_(std::make_unique<C
     connect(qApp, &QGuiApplication::applicationStateChanged, this, [this](Qt::ApplicationState state) { if (state != Qt::ApplicationActive) client_.release(); });
 }
 Window::~Window() { client_.stop(); host_.stop(); }
+void Window::updateHostFileActions() {
+    auto *files = host_.fileTransfer();
+    sendHostFile_->setEnabled(files->offerAvailable() && !files->busy() && !hostFileDialog_);
+    cancelHostFile_->setEnabled(files->offerAvailable() && files->offering());
+}
+void Window::chooseHostFile() {
+    auto *files = host_.fileTransfer();
+    if (!files->offerAvailable() || files->busy() || hostFileDialog_) return;
+    auto *dialog = new QFileDialog(this, QStringLiteral("选择发送给控制端的文件"), fileDirectory_->text());
+    dialog->setObjectName(QStringLiteral("chooseHostFileDialog")); dialog->setAttribute(Qt::WA_DeleteOnClose);
+    // Qt's modeless chooser keeps network timers running while the user browses.
+    dialog->setOption(QFileDialog::DontUseNativeDialog); dialog->setFileMode(QFileDialog::ExistingFile);
+    dialog->setLabelText(QFileDialog::Accept, QStringLiteral("发送"));
+    hostFileDialog_ = dialog; updateHostFileActions();
+    connect(dialog, &QDialog::accepted, this, [this, dialog] {
+        hostFileDialog_ = nullptr;
+        const auto selected = dialog->selectedFiles();
+        if (selected.size() == 1) host_.fileTransfer()->offerFile(selected.first());
+        updateHostFileActions();
+    });
+    connect(dialog, &QDialog::rejected, this, [this] { hostFileDialog_ = nullptr; updateHostFileActions(); });
+    dialog->open();
+}
+void Window::receiveFileOffer(const QString &id, const QString &name, qint64 size) {
+    auto *files = client_.fileTransfer();
+    if (!files->offerAvailable() || incomingFileDialog_) { files->declineOffer(id); return; }
+    client_.release();
+    QString directory = QStandardPaths::writableLocation(QStandardPaths::DownloadLocation);
+    if (directory.isEmpty()) directory = QDir::homePath();
+    QWidget *parent = controlWindow_->isVisible() ? static_cast<QWidget *>(controlWindow_.get()) : this;
+    const QString title = QStringLiteral("接收被控端文件：%1（%2 字节）").arg(name).arg(size);
+    auto *dialog = new QFileDialog(parent, title, directory);
+    dialog->setObjectName(QStringLiteral("receiveFileOfferDialog")); dialog->setAttribute(Qt::WA_DeleteOnClose);
+    dialog->setOption(QFileDialog::DontUseNativeDialog); dialog->setAcceptMode(QFileDialog::AcceptSave);
+    dialog->setFileMode(QFileDialog::AnyFile); dialog->selectFile(name);
+    dialog->setLabelText(QFileDialog::Accept, QStringLiteral("接收")); dialog->setLabelText(QFileDialog::Reject, QStringLiteral("拒绝"));
+    incomingFileDialog_ = dialog;
+    connect(dialog, &QDialog::accepted, this, [this, dialog, id] {
+        incomingFileDialog_ = nullptr;
+        const auto selected = dialog->selectedFiles();
+        if (selected.size() != 1) { client_.fileTransfer()->declineOffer(id); return; }
+        fileWindow_->show(); fileWindow_->raise(); fileWindow_->activateWindow();
+        client_.fileTransfer()->acceptOffer(id, selected.first());
+    });
+    connect(dialog, &QDialog::rejected, this, [this, id] {
+        incomingFileDialog_ = nullptr; client_.fileTransfer()->declineOffer(id);
+    });
+    dialog->open();
+}
 void Window::showStatus(const QString &text) { status_->setText(text); qInfo().noquote() << text; }
 void Window::configureVideo(int fps, const QString &codec) {
     fps_->setCurrentIndex(qMax(0, fps_->findData(fps)));

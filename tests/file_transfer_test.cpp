@@ -7,6 +7,7 @@
 #include <QSaveFile>
 #include <QSignalSpy>
 #include <QTemporaryDir>
+#include <QTimer>
 #include <QtTest>
 
 namespace {
@@ -36,6 +37,9 @@ void connectPair(ld::FileTransferClient &client, ld::FileTransferHost &host) {
     QObject::connect(&client, &ld::FileTransferClient::send, &host, &ld::FileTransferHost::receive, Qt::QueuedConnection);
     QObject::connect(&host, &ld::FileTransferHost::send, &client, &ld::FileTransferClient::receive, Qt::QueuedConnection);
     client.setAvailable(true);
+}
+void enableOffers(ld::FileTransferClient &client, ld::FileTransferHost &host) {
+    client.setOfferAvailable(true); host.setOfferAvailable(true);
 }
 }
 
@@ -271,6 +275,204 @@ private slots:
         client.receive(packet(old, "canceled")); QVERIFY(client.busy());
         client.receive(packet(current, "list", {{"files", QJsonArray{}}, {"truncated", false}})); QVERIFY(!client.busy());
         client.setAvailable(false); const int count = sent.size(); client.refresh(); QCOMPARE(sent.size(), count);
+    }
+
+    void offersRequirePermissionAndAnOrdinaryLocalSource() {
+        QTemporaryDir temp; QVERIFY(writeFile(temp.filePath("chosen.txt"), "selected"));
+        ld::FileTransferHost host; QSignalSpy sent(&host, &ld::FileTransferHost::send);
+        host.offerFile(temp.filePath("chosen.txt")); QVERIFY(!host.busy()); QVERIFY(sent.isEmpty());
+        host.setOfferAvailable(true);
+        host.offerFile(temp.path()); QVERIFY(!host.busy()); QVERIFY(sent.isEmpty());
+#ifndef Q_OS_WIN
+        QVERIFY(QFile::link(temp.filePath("chosen.txt"), temp.filePath("link")));
+        host.offerFile(temp.filePath("link")); QVERIFY(!host.busy()); QVERIFY(sent.isEmpty());
+#endif
+        host.offerFile(temp.filePath("chosen.txt")); QVERIFY(host.busy()); QVERIFY(host.offering());
+        QCOMPARE(sent.count(), 1);
+        const auto offer = QJsonDocument::fromJson(sent.front()[0].toByteArray()).object();
+        QCOMPARE(offer.value("name").toString(), QStringLiteral("chosen.txt"));
+        QVERIFY(!sent.front()[0].toByteArray().contains(temp.path().toUtf8()));
+        for (const bool filesAvailable : {false, true}) {
+            ld::FileTransferClient client; client.setAvailable(filesAvailable);
+            QSignalSpy offered(&client, &ld::FileTransferClient::offered);
+            QSignalSpy rejected(&client, &ld::FileTransferClient::send);
+            // No mutual offer capability, including ordinary old clients.
+            client.receive(sent.front()[0].toByteArray());
+            QVERIFY(offered.isEmpty()); QVERIFY(!client.busy()); QCOMPARE(rejected.count(), 1);
+            QCOMPARE(QJsonDocument::fromJson(rejected.front()[0].toByteArray()).object()["op"].toString(), QStringLiteral("error"));
+        }
+        host.setOfferAvailable(false); QVERIFY(!host.busy()); QVERIFY(!host.offering());
+    }
+
+    void acceptedOfferWaitsForCommittedReceipt_data() {
+        QTest::addColumn<int>("bytes");
+        QTest::newRow("empty") << 0;
+        QTest::newRow("binary-multiple-chunks") << ld::FileChunkSize * 3 + 317;
+    }
+    void acceptedOfferWaitsForCommittedReceipt() {
+        QFETCH(int, bytes);
+        QTemporaryDir temp; const auto data = contents(bytes);
+        const QString source = temp.filePath("选择的文件.bin"), destination = temp.filePath("received.bin");
+        QVERIFY(writeFile(source, data)); QVERIFY(writeFile(destination, "original"));
+        ld::FileTransferHost host; host.configure(temp.filePath("different-share"));
+        ld::FileTransferClient client; client.setAvailable(true); enableOffers(client, host);
+        QByteArray receipt;
+        connect(&host, &ld::FileTransferHost::send, &client, &ld::FileTransferClient::receive, Qt::QueuedConnection);
+        connect(&client, &ld::FileTransferClient::send, &host, [&](const QByteArray &payload) {
+            if (QJsonDocument::fromJson(payload).object()["op"] == "received") receipt = payload;
+            else host.receive(payload);
+        }, Qt::QueuedConnection);
+        QSignalSpy offered(&client, &ld::FileTransferClient::offered);
+        QSignalSpy hostStatus(&host, &ld::FileTransferHost::status);
+        QSignalSpy progress(&host, &ld::FileTransferHost::progress);
+        host.offerFile(source); QTRY_COMPARE(offered.count(), 1);
+        const QString id = offered.front()[0].toString();
+        QVERIFY(client.busy()); QVERIFY(host.busy()); QVERIFY(host.offering());
+        QCOMPARE(offered.front()[1].toString(), QFileInfo(source).fileName());
+        QCOMPARE(offered.front()[2].toLongLong(), qint64(bytes));
+        QCOMPARE(readFile(destination), QByteArray("original"));
+        client.acceptOffer(SecondId, destination); QVERIFY(client.busy()); QVERIFY(receipt.isEmpty());
+        client.acceptOffer(id, destination);
+        QTRY_VERIFY(!client.busy()); QTRY_VERIFY(!receipt.isEmpty());
+        QCOMPARE(hash(readFile(destination)), hash(data));
+        QVERIFY(!QFileInfo::exists(temp.filePath("different-share")));
+        QVERIFY(host.busy()); QVERIFY(host.offering());
+        QCOMPARE(progress.back()[0].toLongLong(), qint64(bytes));
+        QVERIFY(!hostStatus.back()[0].toString().contains(QStringLiteral("已接收并保存")));
+        host.receive(receipt); QVERIFY(!host.busy()); QVERIFY(!host.offering());
+        QVERIFY(hostStatus.back()[0].toString().contains(QStringLiteral("已接收并保存")));
+    }
+
+    void pendingOfferTermination_data() {
+        QTest::addColumn<QString>("action");
+        for (const char *action : {"decline", "host-cancel", "client-cancel", "reset", "host-disabled", "client-disabled", "host-timeout", "client-timeout"})
+            QTest::newRow(action) << QString::fromLatin1(action);
+    }
+    void pendingOfferTermination() {
+        QFETCH(QString, action);
+        QTemporaryDir temp; QVERIFY(writeFile(temp.filePath("source"), "offered"));
+        ld::FileTransferHost host; ld::FileTransferClient client;
+        connectPair(client, host); enableOffers(client, host);
+        QSignalSpy offered(&client, &ld::FileTransferClient::offered);
+        host.offerFile(temp.filePath("source")); QTRY_COMPARE(offered.count(), 1);
+        const QString id = offered.front()[0].toString();
+        if (action == "decline") client.declineOffer(id);
+        else if (action == "host-cancel") host.cancelOffer();
+        else if (action == "client-cancel") client.cancel();
+        else if (action == "reset") { client.reset(); host.reset(); }
+        else if (action == "host-disabled") host.setOfferAvailable(false);
+        else if (action == "client-disabled") client.setOfferAvailable(false);
+        else {
+            QObject *owner = action == "host-timeout" ? static_cast<QObject *>(&host) : static_cast<QObject *>(&client);
+            auto *timer = owner->findChild<QTimer *>("fileOfferTimeout"); QVERIFY(timer);
+            QCOMPARE(timer->interval(), 60000); QVERIFY(timer->isActive());
+            timer->setInterval(1); // Exercise the real timer without a production timeout override API.
+        }
+        QTRY_VERIFY(!client.busy()); QTRY_VERIFY(!host.busy()); QVERIFY(!host.offering());
+        client.acceptOffer(id, temp.filePath("late-output")); QTest::qWait(5);
+        QVERIFY(!QFileInfo::exists(temp.filePath("late-output")));
+        QCOMPARE(entries(temp.path()), QStringList{"source"});
+    }
+
+    void offeredDownloadCancellationAndWriteFailurePreserveFiles() {
+        QTemporaryDir temp; const auto data = contents(ld::FileChunkSize * 4 + 9);
+        const QString source = temp.filePath("source"), destination = temp.filePath("target");
+        QVERIFY(writeFile(source, data)); QVERIFY(writeFile(destination, "original"));
+        ld::FileTransferHost host; ld::FileTransferClient client;
+        connectPair(client, host); enableOffers(client, host);
+        QSignalSpy offered(&client, &ld::FileTransferClient::offered);
+        QSignalSpy status(&host, &ld::FileTransferHost::status);
+        auto cancellation = connect(&client, &ld::FileTransferClient::progress, &client, [&](qint64 done, qint64 total) {
+            if (done > 0 && done < total) client.cancel();
+        });
+        host.offerFile(source); QTRY_COMPARE(offered.count(), 1);
+        client.acceptOffer(offered.back()[0].toString(), destination);
+        QTRY_VERIFY(!client.busy()); QTRY_VERIFY(!host.busy());
+        QCOMPARE(readFile(destination), QByteArray("original"));
+        QCOMPARE(entries(temp.path()), (QStringList{"source", "target"}));
+        disconnect(cancellation);
+        host.offerFile(source); QTRY_COMPARE(offered.count(), 2);
+        client.acceptOffer(offered.back()[0].toString(), temp.filePath("missing-parent/output"));
+        QTRY_VERIFY(!client.busy()); QTRY_VERIFY(!host.busy());
+        QVERIFY(!QFileInfo::exists(temp.filePath("missing-parent")));
+        QVERIFY(!status.back()[0].toString().contains(QStringLiteral("已接收并保存")));
+    }
+
+    void offerMetadataAndUnacceptedDataCannotWrite() {
+        QTemporaryDir temp; ld::FileTransferClient client;
+        client.setAvailable(true); client.setOfferAvailable(true);
+        QSignalSpy offered(&client, &ld::FileTransferClient::offered);
+        for (const auto &name : {QString("../escape"), QString("C:escape"), QString("CON"), QString("bad/name")})
+            client.receive(packet(FirstId, "offer", {{"name", name}, {"size", 1}}));
+        for (double size : {-1.0, 1.5, double(ld::MaxTransferFileSize) + 1})
+            client.receive(packet(FirstId, "offer", {{"name", "valid"}, {"size", size}}));
+        client.receive(packet("invalid-id", "offer", {{"name", "valid"}, {"size", 1}}));
+        QVERIFY(!client.busy()); QVERIFY(offered.isEmpty());
+        client.receive(packet(FirstId, "offer", {{"name", "valid"}, {"size", 1}}));
+        QCOMPARE(offered.count(), 1); QVERIFY(client.busy());
+        client.receive(packet(FirstId, "data", {{"offset", 0}, {"data", "eA=="}, {"eof", true}}));
+        QVERIFY(!client.busy()); QVERIFY(entries(temp.path()).isEmpty());
+        client.receive(packet(FirstId, "offer", {{"name", "valid"}, {"size", 1}}));
+        client.acceptOffer(FirstId, temp.filePath("output"));
+        client.receive(packet(FirstId, "ready", {{"offset", 0}, {"size", 2}}));
+        QVERIFY(!client.busy()); QVERIFY(entries(temp.path()).isEmpty());
+        client.receive(packet(FirstId, "offer", {{"name", "valid"}, {"size", 1}}));
+        client.acceptOffer(FirstId, temp.filePath("output"));
+        client.receive(packet(FirstId, "ready", {{"offset", 0}, {"size", 1}}));
+        client.receive(packet(FirstId, "data", {{"offset", 1}, {"data", "eA=="}, {"eof", true}}));
+        QVERIFY(!client.busy()); QVERIFY(entries(temp.path()).isEmpty());
+    }
+
+    void pendingOffersDoNotReplaceOtherTransfers() {
+        QTemporaryDir temp; QVERIFY(writeFile(temp.filePath("source"), "data"));
+        ld::FileTransferHost host; host.configure(temp.filePath("shared")); host.setOfferAvailable(true);
+        request(host, FirstId, "put", {{"name", "upload"}, {"size", 1}});
+        QVERIFY(host.busy()); QVERIFY(!host.offering());
+        host.offerFile(temp.filePath("source")); host.cancelOffer();
+        QVERIFY(host.busy()); QVERIFY(!host.offering());
+        QCOMPARE(request(host, FirstId, "data", {{"offset", 0}, {"data", "eA=="}})["op"].toString(), QStringLiteral("ack"));
+        request(host, FirstId, "commit", {{"offset", 1}});
+        host.offerFile(temp.filePath("source")); QVERIFY(host.offering());
+        QCOMPARE(request(host, SecondId, "get", {{"name", "upload"}})["op"].toString(), QStringLiteral("error"));
+        QVERIFY(host.offering());
+        ld::FileTransferClient client; client.setAvailable(true); client.setOfferAvailable(true);
+        QSignalSpy offered(&client, &ld::FileTransferClient::offered);
+        QSignalSpy sent(&client, &ld::FileTransferClient::send);
+        client.refresh(); const QString transaction = QJsonDocument::fromJson(sent.back()[0].toByteArray()).object()["id"].toString();
+        client.receive(packet(FirstId, "offer", {{"name", "valid"}, {"size", 1}}));
+        QVERIFY(client.busy()); QVERIFY(offered.isEmpty());
+        client.receive(packet(transaction, "list", {{"files", QJsonArray{}}})); QVERIFY(!client.busy());
+        client.receive(packet(FirstId, "offer", {{"name", "valid"}, {"size", 1}}));
+        const int count = sent.count();
+        client.upload(temp.filePath("source")); client.download("upload", temp.filePath("target")); client.refresh();
+        QCOMPARE(sent.count(), count); QVERIFY(client.busy());
+        client.declineOffer(SecondId); QVERIFY(client.busy());
+        client.receive(packet(SecondId, "canceled")); QVERIFY(client.busy());
+        client.declineOffer(FirstId); QVERIFY(!client.busy());
+    }
+
+    void offeredSourceHandleCannotBeRedirected() {
+#ifdef Q_OS_WIN
+        QSKIP("Windows holds the selected file without FILE_SHARE_DELETE, preventing this rename fixture.");
+#else
+        QTemporaryDir temp; const QString source = temp.filePath("selected");
+        QVERIFY(writeFile(source, "chosen bytes"));
+        ld::FileTransferHost host; host.setOfferAvailable(true);
+        QSignalSpy sent(&host, &ld::FileTransferHost::send);
+        host.offerFile(source); QVERIFY(host.offering());
+        const QString id = QJsonDocument::fromJson(sent.front()[0].toByteArray()).object()["id"].toString();
+        QVERIFY(QFile::rename(source, temp.filePath("moved")));
+        QVERIFY(writeFile(source, "unselected private replacement"));
+        QCOMPARE(request(host, SecondId, "get", {{"name", source}})["op"].toString(), QStringLiteral("error"));
+        QVERIFY(host.offering());
+        QCOMPARE(request(host, id, "accept")["op"].toString(), QStringLiteral("ready"));
+        const auto data = request(host, id, "read", {{"offset", 0}});
+        QCOMPARE(QByteArray::fromBase64(data["data"].toString().toLatin1()), QByteArray("chosen bytes"));
+        QVERIFY(host.busy());
+        QCOMPARE(request(host, SecondId, "received", {{"size", 12}})["op"].toString(), QStringLiteral("error"));
+        QVERIFY(host.busy());
+        host.receive(packet(id, "received", {{"size", 12}})); QVERIFY(!host.busy());
+#endif
     }
 };
 

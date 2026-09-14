@@ -30,7 +30,8 @@
 
 namespace ld {
 namespace {
-enum class Mode { Idle, List, Upload, Download };
+enum class Mode { Idle, List, Upload, Download, Offer, AwaitReceipt };
+constexpr int OfferTimeoutMs = 60 * 1000;
 const QString StagingPrefix = QStringLiteral(".landesk-upload-");
 QString newId() { return QUuid::createUuid().toString(QUuid::WithoutBraces).remove('-'); }
 QByteArray encode(const QJsonObject &object) { return QJsonDocument(object).toJson(QJsonDocument::Compact); }
@@ -200,21 +201,37 @@ bool openRegular(QFile &file, const RootDirectory &root, const QString &name) {
 }
 
 struct FileTransferHost::Impl {
-    explicit Impl(FileTransferHost *owner) : q(owner) {}
+    explicit Impl(FileTransferHost *owner) : q(owner), offerTimer(owner) {
+        offerTimer.setObjectName(QStringLiteral("fileOfferTimeout"));
+        offerTimer.setSingleShot(true); offerTimer.setInterval(OfferTimeoutMs);
+        QObject::connect(&offerTimer, &QTimer::timeout, q, [this] {
+            if (!outgoingOffer) return;
+            const QString transaction = id;
+            const QString text = mode == Mode::AwaitReceipt
+                ? QStringLiteral("接收确认超时，无法确认对方是否已保存文件")
+                : QStringLiteral("文件发送等待超时，已取消");
+            clear(); reply(message(transaction, "canceled")); emit q->status(text);
+        });
+    }
     FileTransferHost *q;
     QString root, id, target, staging;
     Mode mode = Mode::Idle;
+    bool offerEnabled = false, outgoingOffer = false;
+    QTimer offerTimer;
     qint64 size = 0, offset = 0;
     std::unique_ptr<QSaveFile> output;
     std::unique_ptr<QFile> input;
     std::unique_ptr<RootDirectory> pinnedRoot;
 
     void clear() {
+        const bool wasBusy = mode != Mode::Idle;
+        offerTimer.stop(); outgoingOffer = false;
         if (output) output->cancelWriting();
         output.reset(); input.reset();
         if (!staging.isEmpty() && pinnedRoot) pinnedRoot->remove(staging);
         pinnedRoot.reset();
         id.clear(); target.clear(); staging.clear(); mode = Mode::Idle; size = offset = 0;
+        if (wasBusy) emit q->busyChanged(false);
     }
     void reply(QJsonObject object) { emit q->send(encode(object)); }
     void fail(const QString &transaction, const QString &error, bool abort = false) {
@@ -297,7 +314,8 @@ struct FileTransferHost::Impl {
         }
         pinnedRoot = std::move(pinned); id = transaction; offset = 0;
         auto response = message(id, "ready"); response["size"] = double(size); response["offset"] = 0;
-        reply(response);
+        emit q->busyChanged(true);
+        if (id == transaction) reply(response);
     }
 };
 
@@ -306,13 +324,65 @@ FileTransferHost::~FileTransferHost() { impl_->clear(); }
 void FileTransferHost::configure(const QString &root) {
     reset(); impl_->root = root.isEmpty() ? QString() : QDir::cleanPath(QFileInfo(root).absoluteFilePath());
 }
-void FileTransferHost::reset() { impl_->clear(); }
+void FileTransferHost::reset() {
+    const bool wasAvailable = impl_->offerEnabled;
+    impl_->offerEnabled = false; impl_->clear();
+    if (wasAvailable) emit offerAvailableChanged(false);
+}
+bool FileTransferHost::busy() const { return impl_->mode != Mode::Idle; }
+bool FileTransferHost::offering() const { return impl_->outgoingOffer; }
+bool FileTransferHost::offerAvailable() const { return impl_->offerEnabled; }
+void FileTransferHost::setOfferAvailable(bool available) {
+    if (impl_->offerEnabled == available) return;
+    impl_->offerEnabled = available;
+    if (!available) cancelOffer();
+    emit offerAvailableChanged(available);
+}
+void FileTransferHost::offerFile(const QString &localPath) {
+    auto &s = *impl_;
+    if (!s.offerEnabled) { emit status(QStringLiteral("当前连接不支持主动发送文件")); return; }
+    if (busy()) { emit status(QStringLiteral("请等待当前文件传输完成，或先取消")); return; }
+    const QFileInfo selected(localPath);
+    if (!selected.isFile() || selected.isSymLink() || !validName(selected.fileName())) {
+        emit status(QStringLiteral("请选择普通文件；不支持符号链接或无效文件名")); return;
+    }
+    // This local choice grants access to one already-opened file, never a new
+    // network-visible root. No peer-supplied path participates in opening it.
+    auto parent = std::make_unique<RootDirectory>();
+    auto file = std::make_unique<QFile>();
+    const QString parentPath = QFileInfo(selected.absolutePath()).canonicalFilePath();
+    if (parentPath.isEmpty() || !parent->open(parentPath) || !openRegular(*file, *parent, selected.fileName()) ||
+        file->size() < 0 || file->size() > MaxTransferFileSize) {
+        emit status(QStringLiteral("无法安全读取所选普通文件，或文件超过 8 GiB")); return;
+    }
+    s.id = newId(); s.target = selected.fileName(); s.size = file->size(); s.offset = 0;
+    s.input = std::move(file); s.pinnedRoot = std::move(parent);
+    s.mode = Mode::Offer; s.outgoingOffer = true; s.offerTimer.start();
+    const QString transaction = s.id;
+    auto offer = message(transaction, "offer"); offer["name"] = s.target; offer["size"] = double(s.size);
+    emit busyChanged(true);
+    if (s.id != transaction) return;
+    emit progress(0, s.size);
+    if (s.id != transaction) return;
+    emit status(QStringLiteral("等待对方接收 %1（60 秒内确认）").arg(s.target));
+    if (s.id == transaction) s.reply(offer);
+}
+void FileTransferHost::cancelOffer() {
+    auto &s = *impl_;
+    if (!s.outgoingOffer) return;
+    const QString transaction = s.id;
+    s.clear(); s.reply(message(transaction, "canceled"));
+    emit status(QStringLiteral("文件发送已取消"));
+}
 void FileTransferHost::receive(const QByteArray &payload) {
     auto &s = *impl_; QJsonObject request;
     if (!parse(payload, request)) { s.fail({}, QStringLiteral("文件传输消息无效或超过 64 KiB")); return; }
     const QString id = request.value("id").toString(), op = request.value("op").toString();
     if (op == "cancel") {
-        if (id == s.id) s.clear();
+        if (id == s.id) {
+            const bool offered = s.outgoingOffer; s.clear();
+            if (offered) emit status(QStringLiteral("对方已拒绝或取消接收文件"));
+        }
         s.reply(message(id, "canceled")); return;
     }
     if (op == "list" || op == "put" || op == "get") {
@@ -322,6 +392,23 @@ void FileTransferHost::receive(const QByteArray &payload) {
         return;
     }
     if (s.mode == Mode::Idle || id != s.id) { s.fail(id, QStringLiteral("文件传输事务已结束或标识不匹配")); return; }
+    if (s.outgoingOffer && (op == "error" || op == "canceled")) {
+        s.clear(); emit status(QStringLiteral("对方无法接收或已取消文件")); return;
+    }
+    if (s.outgoingOffer && s.mode == Mode::Offer && op == "accept" && s.offerEnabled) {
+        s.mode = Mode::Download; s.offerTimer.start();
+        auto response = message(id, "ready"); response["size"] = double(s.size); response["offset"] = 0;
+        emit status(QStringLiteral("对方已接受，正在发送 %1").arg(s.target));
+        if (s.id == id) s.reply(response);
+        return;
+    }
+    if (s.outgoingOffer && s.mode == Mode::AwaitReceipt && op == "received") {
+        qint64 size = 0;
+        if (!number(request.value("size"), size) || size != s.size) {
+            s.fail(id, QStringLiteral("接收完成大小不匹配"), true); return;
+        }
+        s.clear(); emit status(QStringLiteral("对方已接收并保存文件")); return;
+    }
     qint64 offset = 0;
     if (!number(request.value("offset"), offset) || offset != s.offset) {
         s.fail(id, QStringLiteral("文件块偏移不匹配，传输已取消"), true); return;
@@ -353,15 +440,33 @@ void FileTransferHost::receive(const QByteArray &payload) {
         auto response = message(id, "data"); response["offset"] = double(s.offset);
         response["data"] = QString::fromLatin1(data.toBase64());
         s.offset += data.size(); const bool eof = s.offset == s.size; response["eof"] = eof;
-        if (eof) s.clear();
+        const bool offered = s.outgoingOffer;
+        const qint64 sent = s.offset, total = s.size;
+        if (offered) {
+            s.offerTimer.start();
+            if (eof) { s.mode = Mode::AwaitReceipt; s.input.reset(); s.pinnedRoot.reset(); }
+            emit progress(sent, total);
+            if (s.id != id) return;
+            if (eof) {
+                emit status(QStringLiteral("文件已发出，等待对方保存确认"));
+                if (s.id != id) return;
+            }
+        } else if (eof) s.clear();
         s.reply(response);
     } else s.fail(id, QStringLiteral("文件传输状态或操作无效"), true);
 }
 
 struct FileTransferClient::Impl {
-    explicit Impl(FileTransferClient *owner) : q(owner) {}
+    explicit Impl(FileTransferClient *owner) : q(owner), offerTimer(owner) {
+        offerTimer.setObjectName(QStringLiteral("fileOfferTimeout"));
+        offerTimer.setSingleShot(true); offerTimer.setInterval(OfferTimeoutMs);
+        QObject::connect(&offerTimer, &QTimer::timeout, q, [this] {
+            if (incomingOffer) fail(QStringLiteral("文件接收等待超时，已取消"));
+        });
+    }
     FileTransferClient *q;
-    bool available = false;
+    bool available = false, offerEnabled = false, incomingOffer = false;
+    QTimer offerTimer;
     Mode mode = Mode::Idle;
     QString id, target;
     qint64 size = 0, offset = 0, expectedAck = 0;
@@ -371,6 +476,7 @@ struct FileTransferClient::Impl {
 
     void clear() {
         const bool wasBusy = mode != Mode::Idle;
+        offerTimer.stop(); incomingOffer = false;
         if (output) output->cancelWriting();
         output.reset(); input.reset(); id.clear(); target.clear(); mode = Mode::Idle;
         size = offset = expectedAck = 0; ready = finishing = false;
@@ -423,17 +529,39 @@ FileTransferClient::FileTransferClient(QObject *parent) : QObject(parent), impl_
 FileTransferClient::~FileTransferClient() { impl_->clear(); }
 bool FileTransferClient::available() const { return impl_->available; }
 bool FileTransferClient::busy() const { return impl_->mode != Mode::Idle; }
+bool FileTransferClient::offerAvailable() const { return impl_->available && impl_->offerEnabled; }
+void FileTransferClient::setOfferAvailable(bool available) {
+    impl_->offerEnabled = available;
+    if (!available && impl_->incomingOffer) cancel();
+}
 void FileTransferClient::setAvailable(bool available) {
     if (impl_->available == available) return;
     impl_->available = available;
-    if (!available) impl_->clear();
+    if (!available) { impl_->offerEnabled = false; impl_->clear(); }
     emit availableChanged(available);
     if (!available) emit listing({});
 }
 void FileTransferClient::reset() {
-    impl_->clear();
-    if (impl_->available) { impl_->available = false; emit availableChanged(false); }
+    const bool wasAvailable = impl_->available;
+    impl_->available = impl_->offerEnabled = false; impl_->clear();
+    if (wasAvailable) emit availableChanged(false);
     emit listing({});
+}
+void FileTransferClient::acceptOffer(const QString &id, const QString &localPath) {
+    auto &s = *impl_;
+    if (!offerAvailable() || !s.incomingOffer || s.mode != Mode::Offer || s.id != id) return;
+    const QFileInfo target(localPath);
+    if (localPath.isEmpty() || target.isSymLink() || (target.exists() && !target.isFile())) {
+        s.fail(QStringLiteral("保存目标不能是空路径、符号链接或目录")); return;
+    }
+    // Only this local acceptance selects a destination. The peer sends a plain
+    // display name, never a path that can select where bytes will be written.
+    s.target = localPath; s.mode = Mode::Download; s.offerTimer.start();
+    emit status(QStringLiteral("已同意接收，正在准备文件"));
+    if (s.id == id) s.send(message(id, "accept"));
+}
+void FileTransferClient::declineOffer(const QString &id) {
+    if (impl_->incomingOffer && impl_->id == id && impl_->mode == Mode::Offer) cancel();
 }
 void FileTransferClient::refresh() {
     auto &s = *impl_;
@@ -483,14 +611,40 @@ void FileTransferClient::cancel() {
 }
 void FileTransferClient::receive(const QByteArray &payload) {
     auto &s = *impl_;
-    if (!s.available || s.mode == Mode::Idle) return;
     QJsonObject response;
-    if (!parse(payload, response)) { s.fail(QStringLiteral("文件传输响应无效或过大")); return; }
+    if (!parse(payload, response)) {
+        if (s.available && s.mode != Mode::Idle) s.fail(QStringLiteral("文件传输响应无效或过大"));
+        return;
+    }
+    const QString incomingId = response.value("id").toString();
+    const QString op = response.value("op").toString();
+    if (op == "offer") {
+        qint64 size = 0;
+        const QString name = response.value("name").toString();
+        QString error;
+        if (!offerAvailable()) error = QStringLiteral("当前连接未允许主动发送文件");
+        else if (!validName(name) || !number(response.value("size"), size)) error = QStringLiteral("发送邀请的文件名或大小无效");
+        else if (s.mode != Mode::Idle) error = QStringLiteral("另一个文件正在传输或等待确认");
+        if (!error.isEmpty()) {
+            auto rejection = message(incomingId, "error"); rejection["error"] = error;
+            // A new offer must never abort an existing transaction, even when
+            // its sender reuses the active id. Invalid offers have no file I/O.
+            s.send(rejection); return;
+        }
+        s.id = incomingId; s.size = size; s.offset = 0; s.mode = Mode::Offer;
+        s.incomingOffer = true; s.offerTimer.start();
+        emit busyChanged(true);
+        if (s.id != incomingId) return;
+        emit status(QStringLiteral("对方请求发送 %1，请选择是否接收").arg(name));
+        if (s.id == incomingId) emit offered(incomingId, name, size);
+        return;
+    }
+    if (!s.available || s.mode == Mode::Idle) return;
     if (response.value("id").toString() != s.id) return;
     const QString transaction = s.id;
-    const QString op = response.value("op").toString();
     if (op == "error") { s.fail(response.value("error").toString(QStringLiteral("远端文件传输失败")), false); return; }
-    if (op == "canceled") { s.fail(QStringLiteral("远端已取消文件传输"), false); return; }
+    if (op == "canceled" || (op == "cancel" && s.incomingOffer)) { s.fail(QStringLiteral("远端已取消文件传输"), false); return; }
+    if (s.mode == Mode::Offer) { s.fail(QStringLiteral("尚未同意接收文件，传输已拒绝")); return; }
     if (s.mode == Mode::List && op == "list" && response.value("files").isArray()) {
         const QJsonArray files = response.value("files").toArray();
         if (files.size() > 1000) { s.fail(QStringLiteral("远端文件列表过大")); return; }
@@ -508,13 +662,15 @@ void FileTransferClient::receive(const QByteArray &payload) {
     if ((s.mode == Mode::Upload || s.mode == Mode::Download) && !s.ready && op == "ready") {
         qint64 size = 0, offset = 0;
         if (!number(response.value("size"), size) || !number(response.value("offset"), offset) || offset != 0 ||
-            (s.mode == Mode::Upload && size != s.size)) { s.fail(QStringLiteral("远端文件大小或初始偏移无效")); return; }
+            ((s.mode == Mode::Upload || s.incomingOffer) && size != s.size)) { s.fail(QStringLiteral("远端文件大小或初始偏移无效")); return; }
         s.size = size;
         if (s.mode == Mode::Download) {
             s.output = std::make_unique<QSaveFile>(s.target); s.output->setDirectWriteFallback(false);
             if (!s.output->open(QIODevice::WriteOnly)) { s.fail(QStringLiteral("无法创建本地下载临时文件")); return; }
         }
-        s.ready = true; emit progress(0, s.size);
+        s.ready = true;
+        if (s.incomingOffer) s.offerTimer.start();
+        emit progress(0, s.size);
         if (s.id == transaction) s.next();
         return;
     }
@@ -542,11 +698,19 @@ void FileTransferClient::receive(const QByteArray &payload) {
             s.fail(QStringLiteral("下载文件块大小、偏移或结束标记无效")); return;
         }
         if (s.output->write(data) != data.size()) { s.fail(QStringLiteral("下载写入失败，原文件保持不变")); return; }
+        if (s.incomingOffer) s.offerTimer.start();
         s.offset += data.size(); emit progress(s.offset, s.size);
         if (s.id != transaction) return;
         if (s.offset == s.size) {
             if (!s.output->commit()) { s.fail(QStringLiteral("下载提交失败，原文件保持不变")); return; }
-            s.output.reset(); s.clear(); emit status(QStringLiteral("下载完成"));
+            const bool offered = s.incomingOffer;
+            auto receipt = message(transaction, "received"); receipt["size"] = double(s.size);
+            s.output.reset();
+            // The receipt follows a successful atomic commit, never just EOF.
+            // Queue it before busy=false can start the next transaction.
+            if (offered) s.send(receipt);
+            if (s.id != transaction) return;
+            s.clear(); emit status(offered ? QStringLiteral("文件已接收并保存") : QStringLiteral("下载完成"));
         } else s.next();
         return;
     }

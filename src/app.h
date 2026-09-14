@@ -20,7 +20,11 @@
 #include <QSet>
 #include <QThread>
 #include <QVBoxLayout>
+#include <QPointer>
 #include <memory>
+
+class QFileDialog;
+class QProgressBar;
 
 namespace ld {
 class FileTransferDialog;
@@ -42,6 +46,7 @@ public:
     void configureVideo(int fps, const QString &codec) { targetFps_ = fps; codecPreference_ = codec; }
     void setLockOnDisconnect(bool enabled) { lockOnDisconnect_ = enabled; }
     void configureFiles(const QString &root, bool enabled) { fileRoot_ = root; filesEnabled_ = enabled; }
+    FileTransferHost *fileTransfer() { return &files_; }
 signals: void status(QString text);
     void desktopLockRequested();
     void produceFrame(quint64 generation, bool useHelper);
@@ -83,7 +88,7 @@ private:
     ClipboardSync clipboard_;
     bool clipboardAllowed_ = false;
     QString fileRoot_;
-    bool filesEnabled_ = false, filesAllowed_ = false;
+    bool filesEnabled_ = false, filesAllowed_ = false, fileOffersAllowed_ = false;
 };
 class Client : public QObject {
     Q_OBJECT
@@ -211,6 +216,9 @@ protected: void closeEvent(QCloseEvent *) override;
 private:
     void connectCode();
     void showStatus(const QString &text);
+    void updateHostFileActions();
+    void chooseHostFile();
+    void receiveFileOffer(const QString &id, const QString &name, qint64 size);
     Host host_;
     Client client_;
     QComboBox *addresses_;
@@ -228,5 +236,9 @@ private:
     QCheckBox *allowFiles_;
     QLineEdit *fileDirectory_;
     QPushButton *chooseFileDirectory_;
+    QPushButton *sendHostFile_, *cancelHostFile_;
+    QLabel *hostFileStatus_;
+    QProgressBar *hostFileProgress_;
+    QPointer<QFileDialog> hostFileDialog_, incomingFileDialog_;
 };
 }

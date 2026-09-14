@@ -40,7 +40,7 @@ FileTransferDialog::FileTransferDialog(FileTransferClient *client, QWidget *pare
     resize(640, 480); setMinimumSize(420, 300);
     auto *layout = new QVBoxLayout(this);
     layout->setContentsMargins(16, 14, 16, 14);
-    auto *description = new QLabel(QStringLiteral("被控端共享文件夹中的文件。一次传一个文件，上传同名文件会被拒绝。"));
+    auto *description = new QLabel(QStringLiteral("下方仅列出被控端共享文件夹中的文件。可上传、下载，也可接收被控端主动发送的文件；一次传一个文件，上传同名文件会被拒绝。"));
     description->setTextFormat(Qt::PlainText); description->setWordWrap(true);
     description->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
     layout->addWidget(description);

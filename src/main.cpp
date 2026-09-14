@@ -55,7 +55,7 @@ int main(int argc, char **argv) {
     QApplication::setAttribute(Qt::AA_DisableHighDpiScaling);
 #endif
     QApplication app(argc, argv);
-    QCoreApplication::setApplicationName("bananaDesk"); QCoreApplication::setApplicationVersion("0.7.2");
+    QCoreApplication::setApplicationName("bananaDesk"); QCoreApplication::setApplicationVersion("0.7.3");
     QGuiApplication::setDesktopFileName("bananaDesk");
     QApplication::setWindowIcon(QIcon(QStringLiteral(":/branding/bananaDesk.png")));
     qRegisterMetaType<quint64>("quint64");

@@ -20,9 +20,18 @@ public:
     void configure(const QString &root);
     void receive(const QByteArray &payload);
     void reset();
+    bool busy() const;
+    bool offering() const;
+    bool offerAvailable() const;
+    void setOfferAvailable(bool available);
+    void offerFile(const QString &localPath);
+    void cancelOffer();
 signals:
     void send(QByteArray payload);
     void status(QString text);
+    void busyChanged(bool busy);
+    void offerAvailableChanged(bool available);
+    void progress(qint64 done, qint64 total);
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;
@@ -36,6 +45,10 @@ public:
     bool available() const;
     bool busy() const;
     void setAvailable(bool available);
+    bool offerAvailable() const;
+    void setOfferAvailable(bool available);
+    void acceptOffer(const QString &id, const QString &localPath);
+    void declineOffer(const QString &id);
     void refresh();
     void upload(const QString &localPath);
     void download(const QString &remoteName, const QString &localPath);
@@ -49,6 +62,7 @@ signals:
     void status(QString text);
     void busyChanged(bool busy);
     void availableChanged(bool available);
+    void offered(QString id, QString name, qint64 size);
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;
