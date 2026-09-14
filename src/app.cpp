@@ -11,6 +11,7 @@
 #include <QBuffer>
 #include <QImageReader>
 #include <QNetworkInterface>
+#include <QNetworkProxy>
 #include <QSslConfiguration>
 #include <QVBoxLayout>
 #include <QHBoxLayout>
@@ -41,6 +42,9 @@ static QSslConfiguration tlsConfig() {
     return config;
 }
 Host::Host(QObject *parent) : QObject(parent), server_(this), files_(this), clipboard_(this) {
+    // Invitations specify a direct desktop TCP endpoint, regardless of the
+    // user's application or system HTTP/SOCKS proxy configuration.
+    server_.setProxy(QNetworkProxy::NoProxy);
     connect(&server_, &Listener::accepted, this, &Host::accept);
     connect(&files_, &FileTransferHost::send, this, [this](const QByteArray &payload) {
         if (authenticated_ && filesAllowed_ && wire_ && !wire_->send(Packet::File, payload))
@@ -140,6 +144,7 @@ void Host::drop(const QString &reason) {
 }
 void Host::accept(qintptr descriptor) {
     auto *socket = new QSslSocket(this);
+    socket->setProxy(QNetworkProxy::NoProxy);
     if (!socket->setSocketDescriptor(descriptor)) { socket->deleteLater(); return; }
     if (socket_) { socket->abort(); socket->deleteLater(); return; }
     socket_ = socket; authenticated_ = false; inFlight_ = 0; wakeClock_.invalidate();
@@ -300,6 +305,7 @@ void Client::start(const Invitation &invitation) {
     receivedFrames_ = decodedFrames_ = paintedFrames_ = distinctFrames_ = receivedBytes_ = lastFingerprint_ = 0;
     intervalDecoded_ = intervalPainted_ = intervalBytes_ = 0; decodeTotalMs_ = 0; codec_.clear();
     socket_ = new QSslSocket(this);
+    socket_->setProxy(QNetworkProxy::NoProxy);
     socket_->setSslConfiguration(tlsConfig());
     socket_->setPeerVerifyMode(QSslSocket::VerifyPeer);
     wire_ = new Wire(socket_, MaxPacket, socket_);
