@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=bananaDesk
+Comment=Encrypted remote desktop and file transfer
+Comment[zh_CN]=加密远程桌面与文件传输
+Exec=bananaDesk
+Icon=bananaDesk
+Terminal=false
+Categories=Network;RemoteAccess;
+StartupNotify=true
+StartupWMClass=bananaDesk

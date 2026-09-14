@@ -36,7 +36,7 @@ bool Identity::create(QString &error) {
         !X509_gmtime_adj(X509_getm_notBefore(cert.get()), -60) || !X509_gmtime_adj(X509_getm_notAfter(cert.get()), 86400 * 30) ||
         !X509_set_pubkey(cert.get(), privateKey.get())) return fail();
     X509_NAME *name = X509_get_subject_name(cert.get());
-    if (!X509_NAME_add_entry_by_txt(name, "CN", MBSTRING_ASC, reinterpret_cast<const unsigned char *>("LanDesk ephemeral host"), -1, -1, 0) ||
+    if (!X509_NAME_add_entry_by_txt(name, "CN", MBSTRING_ASC, reinterpret_cast<const unsigned char *>("bananaDesk ephemeral host"), -1, -1, 0) ||
         !X509_set_issuer_name(cert.get(), name) || !X509_sign(cert.get(), privateKey.get(), EVP_sha256())) return fail();
     Bio certBio(BIO_new(BIO_s_mem()), BIO_free), keyBio(BIO_new(BIO_s_mem()), BIO_free);
     if (!certBio || !keyBio || !PEM_write_bio_X509(certBio.get(), cert.get()) || !PEM_write_bio_PrivateKey(keyBio.get(), privateKey.get(), nullptr, nullptr, 0, nullptr, nullptr)) return fail();

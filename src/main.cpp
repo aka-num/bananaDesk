@@ -1,6 +1,7 @@
 #include "app.h"
 #include "video_codec.h"
 #include <QApplication>
+#include <QIcon>
 #include <QCommandLineParser>
 #include <QDateTime>
 #include <QDir>
@@ -35,7 +36,7 @@ static void logMessage(QtMsgType type, const QMessageLogContext &, const QString
 static int startupFailure(const QString &message, bool interactive = true) {
     qCritical().noquote() << message;
 #ifdef Q_OS_WIN
-    if (interactive) QMessageBox::critical(nullptr, QStringLiteral("LanDesk 无法启动"), message);
+    if (interactive) QMessageBox::critical(nullptr, QStringLiteral("bananaDesk 无法启动"), message);
 #else
     Q_UNUSED(interactive);
 #endif
@@ -54,7 +55,9 @@ int main(int argc, char **argv) {
     QApplication::setAttribute(Qt::AA_DisableHighDpiScaling);
 #endif
     QApplication app(argc, argv);
-    QCoreApplication::setApplicationName("LanDesk"); QCoreApplication::setApplicationVersion("0.6.0");
+    QCoreApplication::setApplicationName("bananaDesk"); QCoreApplication::setApplicationVersion("0.6.1");
+    QGuiApplication::setDesktopFileName("bananaDesk");
+    QApplication::setWindowIcon(QIcon(QStringLiteral(":/branding/bananaDesk.png")));
     qRegisterMetaType<quint64>("quint64");
     QCommandLineParser parser; parser.setApplicationDescription(QStringLiteral("局域网远程桌面，TLS 指纹验证与临时连接码"));
     parser.addHelpOption(); parser.addVersionOption();
@@ -77,7 +80,7 @@ int main(int argc, char **argv) {
 #ifdef Q_OS_WIN
     if (logPath.isEmpty()) {
         const QString dir = QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation);
-        if (QDir().mkpath(dir)) logPath = dir + "/landesk.log";
+        if (QDir().mkpath(dir)) logPath = dir + "/bananaDesk.log";
     }
 #endif
     if (!logPath.isEmpty()) {
@@ -88,10 +91,11 @@ int main(int argc, char **argv) {
     }
     const bool tlsAvailable = QSslSocket::supportsSsl();
     const bool h264Available = ld::VideoEncoder::available() && ld::VideoDecoder::available();
-    qInfo().noquote() << QStringLiteral("LanDesk %1 · Qt %2 · TLS %3 · H.264 %4")
+    qInfo().noquote() << QStringLiteral("bananaDesk %1 · Qt %2 · TLS %3 · H.264 %4")
         .arg(QCoreApplication::applicationVersion(), qVersion(), QSslSocket::sslLibraryVersionString(), h264Available ? "available" : "unavailable");
     if (parser.isSet("diagnostics-file")) {
-        QJsonObject report{{"version", QCoreApplication::applicationVersion()}, {"qt", qVersion()},
+        QJsonObject report{{"application", QCoreApplication::applicationName()}, {"version", QCoreApplication::applicationVersion()}, {"qt", qVersion()},
+            {"application_icon_available", !QApplication::windowIcon().isNull()},
             {"tls_available", tlsAvailable}, {"tls_version", QSslSocket::sslLibraryVersionString()},
             {"h264_available", h264Available}, {"platform", QGuiApplication::platformName()}};
         QSaveFile file(parser.value("diagnostics-file"));

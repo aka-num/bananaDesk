@@ -29,6 +29,8 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QFileDialog>
+#include <QFileInfo>
+#include <QPixmap>
 #include <QStandardPaths>
 #include <QDir>
 #include <algorithm>
@@ -448,7 +450,7 @@ void Viewer::keyReleaseEvent(QKeyEvent *e) {
 void Viewer::focusOutEvent(QFocusEvent *e) { pressedButtons_.clear(); emit releaseKeys(); QWidget::focusOutEvent(e); }
 
 ControlWindow::ControlWindow() {
-    setWindowTitle(QStringLiteral("LanDesk · 控制远程桌面"));
+    setWindowTitle(QStringLiteral("bananaDesk · 控制远程桌面"));
     QSize initialSize(1120, 760);
     if (auto *screen = QGuiApplication::primaryScreen()) initialSize = initialSize.boundedTo(screen->availableGeometry().size() * 0.9);
     resize(initialSize);
@@ -481,14 +483,17 @@ void ControlWindow::closeEvent(QCloseEvent *event) { emit disconnectRequested();
 
 Window::Window() : host_(this), client_(this), controlWindow_(std::make_unique<ControlWindow>()) {
     fileWindow_ = std::make_unique<FileTransferDialog>(client_.fileTransfer(), controlWindow_.get());
-    setWindowTitle(QStringLiteral("LanDesk · 局域网远程桌面"));
+    setWindowTitle(QStringLiteral("bananaDesk · 局域网远程桌面"));
     QSize initialSize(1120, 760);
     if (auto *screen = QGuiApplication::primaryScreen()) initialSize = initialSize.boundedTo(screen->availableGeometry().size() * 0.9);
     resize(initialSize);
     auto *root = new QWidget; auto *layout = new QVBoxLayout(root); layout->setContentsMargins(22, 18, 22, 12);
-    auto *title = new QLabel(QStringLiteral("LanDesk")); title->setStyleSheet("font-size:26px;font-weight:600;color:#16324f");
+    auto *title = new QLabel(QStringLiteral("bananaDesk")); title->setStyleSheet("font-size:26px;font-weight:600;color:#16324f");
+    auto *brand = new QHBoxLayout;
+    auto *logo = new QLabel; logo->setPixmap(QPixmap(QStringLiteral(":/branding/bananaDesk.png")).scaled(44, 44, Qt::KeepAspectRatio, Qt::SmoothTransformation));
+    brand->addWidget(logo); brand->addWidget(title); brand->addStretch();
     auto *subtitle = new QLabel(QStringLiteral("局域网直连 · 加密连接 · Windows / Linux")); subtitle->setStyleSheet("color:#52677d;margin-bottom:10px");
-    layout->addWidget(title); layout->addWidget(subtitle);
+    layout->addLayout(brand); layout->addWidget(subtitle);
     tabs_ = new QTabWidget; layout->addWidget(tabs_, 1);
     auto *sharePage = new QWidget; auto *shareLayout = new QVBoxLayout(sharePage); shareLayout->setContentsMargins(20, 20, 20, 20);
     auto *info = new QLabel(QStringLiteral("共享本机的主显示器。持有连接码的人可在共享期间连接；停止共享会立即撤销连接码。")); info->setWordWrap(true); shareLayout->addWidget(info);
@@ -519,7 +524,8 @@ Window::Window() : host_(this), client_(this), controlWindow_(std::make_unique<C
     fileDirectory_ = new QLineEdit; fileDirectory_->setReadOnly(true);
     QString downloadDir = QStandardPaths::writableLocation(QStandardPaths::DownloadLocation);
     if (downloadDir.isEmpty()) downloadDir = QStandardPaths::writableLocation(QStandardPaths::DocumentsLocation);
-    fileDirectory_->setText(QDir(downloadDir).filePath("LanDesk"));
+    const QString legacyDirectory = QDir(downloadDir).filePath("LanDesk");
+    fileDirectory_->setText(QFileInfo(legacyDirectory).isDir() ? legacyDirectory : QDir(downloadDir).filePath("bananaDesk"));
     chooseFileDirectory_ = new QPushButton(QStringLiteral("选择文件夹"));
     filePathRow->addWidget(fileDirectory_, 1); filePathRow->addWidget(chooseFileDirectory_); shareLayout->addLayout(filePathRow);
     connect(chooseFileDirectory_, &QPushButton::clicked, this, [this] {

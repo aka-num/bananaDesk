@@ -474,14 +474,14 @@ int install(const std::wstring &sid) {
         RegCloseKey(registry);
     }
     std::wstring command = L"\"" + destination + L"\" --service";
-    SC_HANDLE service = result == ERROR_SUCCESS ? CreateServiceW(manager, ServiceName, L"LanDesk Remote Unlock Helper", SERVICE_ALL_ACCESS,
+    SC_HANDLE service = result == ERROR_SUCCESS ? CreateServiceW(manager, ServiceName, L"bananaDesk Remote Unlock Helper", SERVICE_ALL_ACCESS,
         SERVICE_WIN32_OWN_PROCESS, SERVICE_DEMAND_START, SERVICE_ERROR_NORMAL, command.c_str(), nullptr, nullptr, nullptr, nullptr, nullptr) : nullptr;
     if (!service && result == ERROR_SUCCESS) result = LONG(GetLastError());
     if (service) {
         Security serviceAcl(L"D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;0x0014;;;" + sid + L")");
         if (!serviceAcl.descriptor || !SetServiceObjectSecurity(service, DACL_SECURITY_INFORMATION, serviceAcl.descriptor)) result = LONG(GetLastError());
         SERVICE_DESCRIPTIONW description{};
-        wchar_t text[] = L"Optional LanDesk secure desktop capture/input for the installing user's active console session. No network listener. Start on demand; removable using the LanDesk uninstall helper.";
+        wchar_t text[] = L"Optional bananaDesk secure desktop capture/input for the installing user's active console session. No network listener. Start on demand; removable using the bananaDesk uninstall helper.";
         description.lpDescription = text; ChangeServiceConfig2W(service, SERVICE_CONFIG_DESCRIPTION, &description);
         if (result != ERROR_SUCCESS) DeleteService(service);
         CloseServiceHandle(service);
@@ -538,9 +538,9 @@ int wmain(int argc, wchar_t **argv) {
     } else if (argc == 3 && !wcscmp(argv[1], L"--install-elevated")) result = install(argv[2]);
     else if (argc == 2 && !wcscmp(argv[1], L"--uninstall")) result = elevate(L"--uninstall-elevated");
     else if (argc == 2 && !wcscmp(argv[1], L"--uninstall-elevated")) result = uninstall();
-    else if (argc == 2 && !wcscmp(argv[1], L"--version")) { std::puts("LanDesk optional Windows unlock helper protocol 1"); return 0; }
+    else if (argc == 2 && !wcscmp(argv[1], L"--version")) { std::puts("bananaDesk optional Windows unlock helper protocol 1"); return 0; }
     else { std::puts("Usage: landesk-helper.exe --install | --uninstall | --version"); return result; }
-    if (!result) std::puts("Operation completed. Restart LanDesk after installing/removing the optional unlock helper.");
+    if (!result) std::puts("Operation completed. Restart bananaDesk after installing/removing the optional unlock helper.");
     else std::fprintf(stderr, "Operation failed: Windows error %d. Installation requires UAC approval. An existing installation must be uninstalled first.\n", result);
     return result;
 }

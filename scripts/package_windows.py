@@ -91,7 +91,7 @@ def copy_file(source, destination):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--exe', required=True, type=Path, help='Built landesk.exe')
+    parser.add_argument('--exe', required=True, type=Path, help='Built bananaDesk.exe')
     parser.add_argument('--extra-executable', action='append', default=[], type=Path,
                         help='Additional local executable, e.g. codec self-test (repeatable)')
     parser.add_argument('--sdk', required=True, type=Path, help='Extracted SDK mingw64 directory')
@@ -106,8 +106,8 @@ def main():
     sdk, output, executable = args.sdk.resolve(), args.output.resolve(), args.exe.resolve()
     additional = [path.resolve() for path in args.extra_executable]
     application_paths = {executable, *additional}
-    if len({'landesk.exe', *(path.name.lower() for path in additional)}) != 1 + len(additional):
-        raise RuntimeError('Additional executable filenames must be unique and different from landesk.exe')
+    if len({'bananaDesk.exe', *(path.name.lower() for path in additional)}) != 1 + len(additional):
+        raise RuntimeError('Additional executable filenames must be unique and different from bananaDesk.exe')
     lock_path = args.lock.resolve()
     lock = json.loads(lock_path.read_text())
     archive_dir = (args.packages or lock_path.parent / 'packages').resolve()
@@ -126,7 +126,7 @@ def main():
         else:
             overlay_metadata = {'provenance': 'Local overlay; build provenance not supplied.'}
     # Qt5Network loads OpenSSL dynamically; PE imports alone cannot find it.
-    seeds = [(executable, Path('landesk.exe')),
+    seeds = [(executable, Path('bananaDesk.exe')),
              (sdk / 'bin/libssl-3-x64.dll', Path('libssl-3-x64.dll')),
              (sdk / 'bin/libcrypto-3-x64.dll', Path('libcrypto-3-x64.dll')),
              (sdk / 'share/qt5/plugins/platforms/qwindows.dll', Path('platforms/qwindows.dll')),
@@ -170,7 +170,7 @@ def main():
         source, relative = entry['source'], entry['relative']
         copy_file(source, output / relative)
         archive_name = source.relative_to(sdk.parent).as_posix() if source.is_relative_to(sdk) else None
-        owner = owners[archive_name] if archive_name else ('LanDesk application' if source in application_paths else 'Local FFmpeg overlay')
+        owner = owners[archive_name] if archive_name else ('bananaDesk application' if source in application_paths else 'Local FFmpeg overlay')
         manifest_files.append({'path': relative.as_posix(), 'bytes': source.stat().st_size,
                                'sha256': digest(output / relative), 'imports': entry['imports'],
                                'package': owner})
@@ -213,7 +213,7 @@ def main():
         'local_overlay': overlay_metadata,
         'note': 'License labels are preserved from the official package database; they are not a relicensing declaration.'
     }, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
-    report = {'target': 'Windows 10 x64', 'executable': 'landesk.exe',
+    report = {'target': 'Windows 10 x64', 'executable': 'bananaDesk.exe',
               'additional_executables': [path.name for path in additional],
               'dll_count': len(planned) - len(application_paths), 'runtime_bytes': sum(f['bytes'] for f in manifest_files),
               'dependency_package_count': len(used_packages),

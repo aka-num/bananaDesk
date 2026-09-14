@@ -35,7 +35,7 @@ bool plainName(const QString &name) {
 
 FileTransferDialog::FileTransferDialog(FileTransferClient *client, QWidget *parent)
     : QDialog(parent), client_(client) {
-    setWindowTitle(QStringLiteral("LanDesk · 文件传输"));
+    setWindowTitle(QStringLiteral("bananaDesk · 文件传输"));
     setObjectName(QStringLiteral("fileTransferDialog"));
     resize(640, 480); setMinimumSize(420, 300);
     auto *layout = new QVBoxLayout(this);
