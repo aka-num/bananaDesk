@@ -58,7 +58,14 @@ def xvfb(directory, name):
     env = os.environ.copy()
     env.update(DISPLAY=":" + number, XDG_SESSION_TYPE="x11", QT_QPA_PLATFORM="xcb")
     env.pop("QT_SCALE_FACTOR", None); env.pop("QT_AUTO_SCREEN_SCALE_FACTOR", None)
-    env.pop("XAUTHORITY", None)
+    profile = directory / (name + "-profile")
+    profile.mkdir(mode=0o700)
+    env.update(HOME=str(profile), XDG_CONFIG_HOME=str(profile), XDG_DATA_HOME=str(profile),
+               XDG_CACHE_HOME=str(profile), XDG_RUNTIME_DIR=str(profile),
+               DBUS_SESSION_BUS_ADDRESS="unix:path=" + str(profile / "no-session-bus"),
+               DBUS_SYSTEM_BUS_ADDRESS="unix:path=" + str(profile / "no-system-bus"))
+    for key in ("XAUTHORITY", "WAYLAND_DISPLAY", "SESSION_MANAGER", "AT_SPI_BUS_ADDRESS"):
+        env.pop(key, None)
     return env
 
 def free_port():
@@ -228,8 +235,8 @@ try:
     invite_file.unlink()
     host = launch([str(binary), "--host", "--view-only", "--bind", "127.0.0.1", "--port", str(invite["port"]), "--invite-file", str(invite_file)], host_env, directory / "readonly-host.log")
     wait_for(invite_file.exists); new_invite = decode_invite(invite_file)
-    assert new_invite["token"] != invite["token"] and new_invite["pin"] != invite["pin"]
-    check("restarting sharing rotates both access token and TLS identity")
+    assert new_invite == invite
+    check("restarting sharing preserves the invitation at the same endpoint")
     sock, welcome, _ = authorized(new_invite); assert welcome["control"] is False
     send(sock, "I", {"kind": "key", "key": 65, "down": True}); closed(sock)
     check("view-only permission enforced by host")

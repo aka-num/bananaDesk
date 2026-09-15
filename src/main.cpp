@@ -55,11 +55,11 @@ int main(int argc, char **argv) {
     QApplication::setAttribute(Qt::AA_DisableHighDpiScaling);
 #endif
     QApplication app(argc, argv);
-    QCoreApplication::setApplicationName("bananaDesk"); QCoreApplication::setApplicationVersion("0.7.3");
+    QCoreApplication::setApplicationName("bananaDesk"); QCoreApplication::setApplicationVersion("0.7.4");
     QGuiApplication::setDesktopFileName("bananaDesk");
     QApplication::setWindowIcon(QIcon(QStringLiteral(":/branding/bananaDesk.png")));
     qRegisterMetaType<quint64>("quint64");
-    QCommandLineParser parser; parser.setApplicationDescription(QStringLiteral("局域网远程桌面，TLS 指纹验证与临时连接码"));
+    QCommandLineParser parser; parser.setApplicationDescription(QStringLiteral("局域网远程桌面，TLS 指纹验证与可手动重置的固定共享码"));
     parser.addHelpOption(); parser.addVersionOption();
     parser.addOption({"host", "Start sharing after opening the window"});
     parser.addOption({"view-only", "Allow viewing only when sharing"});
@@ -124,7 +124,7 @@ int main(int argc, char **argv) {
     QObject::connect(&terminationTimer, &QTimer::timeout, &app, [&] { if (interrupted) app.quit(); });
     terminationTimer.start(100);
     QTimer::singleShot(0, &window, [&] {
-        if (parser.isSet("host") && !window.startHost(parser.value("bind"), quint16(port), parser.value("invite-file"))) { app.exit(2); return; }
+        if (parser.isSet("host") && !window.startHost(parser.value("bind"), parser.isSet("port") ? quint16(port) : 0, parser.value("invite-file"))) { app.exit(2); return; }
         if (parser.isSet("connect-file")) window.connectFile(parser.value("connect-file"));
     });
     return app.exec();

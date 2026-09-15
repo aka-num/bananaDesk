@@ -1,5 +1,6 @@
 #pragma once
 #include "protocol.h"
+#include "identity_store.h"
 #include "native_input.h"
 #include "video_pipeline.h"
 #include "file_transfer.h"
@@ -37,10 +38,11 @@ protected: void incomingConnection(qintptr descriptor) override { emit accepted(
 class Host : public QObject {
     Q_OBJECT
 public:
-    explicit Host(QObject *parent);
+    explicit Host(QObject *parent, const QString &identityDirectory = {});
     ~Host() override;
     bool start(const QHostAddress &bind, quint16 port, bool control, QString &error);
     void stop();
+    bool resetSharingCode(QString &error);
     QString invitation() const;
     bool running() const { return server_.isListening(); }
     void configureVideo(int fps, const QString &codec) { targetFps_ = fps; codecPreference_ = codec; }
@@ -62,6 +64,7 @@ private:
     void releaseInput();
     Listener server_;
     Identity identity_;
+    std::unique_ptr<IdentityStore> identityStore_;
     NativeInput input_;
     QHostAddress address_;
     QSslSocket *socket_ = nullptr;
@@ -205,7 +208,7 @@ class Window : public QMainWindow {
 public:
     explicit Window();
     ~Window() override;
-    bool startHost(const QString &bind = {}, quint16 port = DefaultPort, const QString &inviteFile = {});
+    bool startHost(const QString &bind = {}, quint16 port = 0, const QString &inviteFile = {});
     void setViewOnly() { allowControl_->setChecked(false); }
     void setLockOnDisconnect(bool enabled) { lockOnDisconnect_->setChecked(enabled); }
     void configureFiles(const QString &directory, bool enabled);
@@ -227,6 +230,8 @@ private:
     QCheckBox *allowControl_;
     QCheckBox *lockOnDisconnect_;
     QPushButton *share_;
+    QPushButton *resetCode_;
+    QString inviteFile_;
     QPlainTextEdit *invitation_;
     QPlainTextEdit *connectCode_;
     QLabel *status_;

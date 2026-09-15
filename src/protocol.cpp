@@ -2,6 +2,7 @@
 #include <QJsonDocument>
 #include <QJsonParseError>
 #include <QRegularExpression>
+#include <QDateTime>
 #include <QtEndian>
 #include <openssl/evp.h>
 #include <openssl/pem.h>
@@ -32,11 +33,17 @@ bool Identity::create(QString &error) {
     if (!ctx || EVP_PKEY_keygen_init(ctx.get()) <= 0 || EVP_PKEY_CTX_set_rsa_keygen_bits(ctx.get(), 2048) <= 0 || EVP_PKEY_keygen(ctx.get(), &raw) <= 0) return fail();
     Key privateKey(raw, EVP_PKEY_free);
     Cert cert(X509_new(), X509_free);
+    // Invitation pins are persistent. Use an ASN.1 date string instead of a
+    // seconds offset, which overflows a 32-bit long on Windows for 100 years.
+    const auto now = QDateTime::currentDateTimeUtc();
+    const auto validFrom = now.addSecs(-60).toString(QStringLiteral("yyyyMMddHHmmss'Z'")).toLatin1();
+    const auto validUntil = now.addYears(100).toString(QStringLiteral("yyyyMMddHHmmss'Z'")).toLatin1();
     if (!cert || !X509_set_version(cert.get(), 2) || !ASN1_INTEGER_set(X509_get_serialNumber(cert.get()), 1) ||
-        !X509_gmtime_adj(X509_getm_notBefore(cert.get()), -60) || !X509_gmtime_adj(X509_getm_notAfter(cert.get()), 86400 * 30) ||
+        !ASN1_TIME_set_string_X509(X509_getm_notBefore(cert.get()), validFrom.constData()) ||
+        !ASN1_TIME_set_string_X509(X509_getm_notAfter(cert.get()), validUntil.constData()) ||
         !X509_set_pubkey(cert.get(), privateKey.get())) return fail();
     X509_NAME *name = X509_get_subject_name(cert.get());
-    if (!X509_NAME_add_entry_by_txt(name, "CN", MBSTRING_ASC, reinterpret_cast<const unsigned char *>("bananaDesk ephemeral host"), -1, -1, 0) ||
+    if (!X509_NAME_add_entry_by_txt(name, "CN", MBSTRING_ASC, reinterpret_cast<const unsigned char *>("bananaDesk persistent host"), -1, -1, 0) ||
         !X509_set_issuer_name(cert.get(), name) || !X509_sign(cert.get(), privateKey.get(), EVP_sha256())) return fail();
     Bio certBio(BIO_new(BIO_s_mem()), BIO_free), keyBio(BIO_new(BIO_s_mem()), BIO_free);
     if (!certBio || !keyBio || !PEM_write_bio_X509(certBio.get(), cert.get()) || !PEM_write_bio_PrivateKey(keyBio.get(), privateKey.get(), nullptr, nullptr, 0, nullptr, nullptr)) return fail();

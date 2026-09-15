@@ -20,6 +20,7 @@ bananaDesk makes it convenient for individuals to manage their computers across 
 - Desktop viewing, keyboard input, and mouse control between Windows and Linux.
 - A separate, resizable control window, with a fullscreen mode that shows only the remote desktop.
 - Automatic two-way plain-text clipboard synchronization.
+- Persistent connection codes with manual reset: reuse a code after restarting sharing under the same OS user, IP address and port; reset invalidates the old code.
 - File uploads and downloads, plus files actively sent by the computer being controlled.
 
 The Linux computer being controlled currently requires **X11**; Wayland is not supported yet. Windows packages target Intel/AMD 64-bit devices. The current Linux package is built for Ubuntu 22.04/X11 and is not a universal installer for every distribution. The project is still evolving, and compatibility and performance need more validation across real devices.
@@ -53,6 +54,7 @@ bananaDesk 方便个人在 Windows 和 Linux 之间操作自己的电脑。
 - Windows 与 Linux 之间的桌面查看、键盘和鼠标控制。
 - 独立控制窗口，可调整大小，也可切换到只显示远程画面的全屏模式。
 - 自动双向纯文本剪贴板同步。
+- 固定共享码与手动重置：同一系统用户、IP 和端口下，重新开启共享可继续用原码；重置使旧码失效。
 - 文件上传、下载，以及被控端主动选择文件发送给控制端。
 
 Linux 被控端目前需要 **X11**，暂不支持 Wayland。Windows 发布包面向 Intel／AMD 64 位设备，Linux 发布包目前针对 Ubuntu 22.04／X11 构建，并非适用于所有发行版的通用安装包。项目仍在迭代，跨设备兼容性和性能还需要更多实际使用验证。

@@ -44,7 +44,8 @@ static QSslConfiguration tlsConfig() {
     config.setProtocol(QSsl::TlsV1_2OrLater);
     return config;
 }
-Host::Host(QObject *parent) : QObject(parent), server_(this), files_(this), clipboard_(this) {
+Host::Host(QObject *parent, const QString &identityDirectory) : QObject(parent), server_(this), files_(this), clipboard_(this) {
+    if (!identityDirectory.isEmpty()) identityStore_ = std::make_unique<IdentityStore>(identityDirectory);
     // Invitations specify a direct desktop TCP endpoint, regardless of the
     // user's application or system HTTP/SOCKS proxy configuration.
     server_.setProxy(QNetworkProxy::NoProxy);
@@ -101,8 +102,10 @@ bool Host::start(const QHostAddress &bind, quint16 port, bool control, QString &
     if (bind.protocol() != QAbstractSocket::IPv4Protocol || bind == QHostAddress::AnyIPv4 || bind.isMulticast()) {
         error = QStringLiteral("请选择具体的本机 IPv4 地址"); return false;
     }
-    if (!identity_.create(error)) return false;
-    if (!server_.listen(bind, port)) { error = server_.errorString(); return false; }
+    if (identityStore_) {
+        if (!identityStore_->loadOrCreate(identity_, error)) { identityStore_->release(); return false; }
+    } else if (!identity_.create(error)) return false;
+    if (!server_.listen(bind, port)) { error = server_.errorString(); stop(); return false; }
     address_ = bind; control_ = control;
     filesAllowed_ = control_ && filesEnabled_ && !fileRoot_.isEmpty();
     files_.configure(filesAllowed_ ? fileRoot_ : QString());
@@ -116,10 +119,29 @@ bool Host::start(const QHostAddress &bind, quint16 port, bool control, QString &
     return true;
 }
 QString Host::invitation() const {
+    if (!running()) return {};
     return Invitation{address_.toString(), server_.serverPort(), identity_.fingerprint, identity_.token}.encode();
 }
 void Host::stop() {
     timer_.stop(); server_.close(); drop(QString()); identity_ = Identity();
+    if (identityStore_) identityStore_->release();
+}
+bool Host::resetSharingCode(QString &error) {
+    Identity replacement;
+    const bool active = running();
+    const bool saved = identityStore_ ? identityStore_->reset(replacement, error) : replacement.create(error);
+    if (!saved) {
+        if (identityStore_ && !active) identityStore_->release();
+        return false;
+    }
+    // Persist before ending the session: a write failure must leave the
+    // working code and connection intact. The listener keeps its endpoint.
+    identity_ = std::move(replacement);
+    drop(QString());
+    if (identityStore_ && !active) identityStore_->release();
+    emit status(active ? QStringLiteral("共享码已重置，旧码已失效 · 等待连接")
+                       : QStringLiteral("共享码已重置，旧码已失效 · 开始共享后可复制新码"));
+    return true;
 }
 void Host::releaseInput() {
 #ifdef Q_OS_WIN
@@ -587,7 +609,8 @@ void ControlWindow::setFileCapability(bool enabled) { filesButton_->setEnabled(e
 void ControlWindow::sessionEnded() { localShortcutKeys_.clear(); viewer_->reset(); wakeButton_->setEnabled(false); filesButton_->setEnabled(false); performance_->clear(); hide(); }
 void ControlWindow::closeEvent(QCloseEvent *event) { emit disconnectRequested(); event->accept(); }
 
-Window::Window() : host_(this), client_(this), controlWindow_(std::make_unique<ControlWindow>()) {
+Window::Window() : host_(this, QDir(QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation)).filePath("sharing")),
+    client_(this), controlWindow_(std::make_unique<ControlWindow>()) {
     fileWindow_ = std::make_unique<FileTransferDialog>(client_.fileTransfer(), controlWindow_.get());
     setWindowTitle(QStringLiteral("bananaDesk · 局域网远程桌面"));
     QSize initialSize(1120, 760);
@@ -602,8 +625,9 @@ Window::Window() : host_(this), client_(this), controlWindow_(std::make_unique<C
     layout->addLayout(brand); layout->addWidget(subtitle);
     tabs_ = new QTabWidget; layout->addWidget(tabs_, 1);
     auto *sharePage = new QWidget; auto *shareLayout = new QVBoxLayout(sharePage); shareLayout->setContentsMargins(20, 20, 20, 20);
-    auto *info = new QLabel(QStringLiteral("共享本机的主显示器。持有连接码的人可在共享期间连接；停止共享会立即撤销连接码。")); info->setWordWrap(true); shareLayout->addWidget(info);
+    auto *info = new QLabel(QStringLiteral("共享本机的主显示器。共享码自动保存，停止共享或重启程序后可继续使用；手动重置才会撤销旧码。IP 地址或端口变化时，请重新复制共享码。")); info->setWordWrap(true); shareLayout->addWidget(info);
     addresses_ = new QComboBox;
+    addresses_->setObjectName(QStringLiteral("sharingAddress"));
     QStringList addresses;
     for (const auto &iface : QNetworkInterface::allInterfaces()) {
         if (!(iface.flags() & QNetworkInterface::IsUp) || (iface.flags() & QNetworkInterface::IsLoopBack)) continue;
@@ -616,6 +640,11 @@ Window::Window() : host_(this), client_(this), controlWindow_(std::make_unique<C
     });
     addresses << "127.0.0.1"; addresses_->addItems(addresses);
     port_ = new QSpinBox; port_->setRange(1024, 65535); port_->setValue(DefaultPort);
+    port_->setObjectName(QStringLiteral("sharingPort"));
+    QSettings sharingSettings(QSettings::IniFormat, QSettings::UserScope, "bananaDesk", "bananaDesk");
+    const QString savedAddress = sharingSettings.value(QStringLiteral("sharing/address")).toString();
+    if (addresses_->findText(savedAddress) >= 0) addresses_->setCurrentText(savedAddress);
+    port_->setValue(sharingSettings.value(QStringLiteral("sharing/port"), DefaultPort).toInt());
     auto *form = new QFormLayout; form->addRow(QStringLiteral("监听地址"), addresses_); form->addRow(QStringLiteral("端口"), port_); shareLayout->addLayout(form);
     fps_ = new QComboBox;
     for (int fps : {60, 30, 15}) fps_->addItem(QStringLiteral("%1 fps").arg(fps), fps);
@@ -680,9 +709,15 @@ Window::Window() : host_(this), client_(this), controlWindow_(std::make_unique<C
 #endif
     lockHint->setWordWrap(true); lockHint->setStyleSheet("color:#52677d"); shareLayout->addWidget(lockHint);
     share_ = new QPushButton(QStringLiteral("开始共享")); share_->setMinimumHeight(38); shareLayout->addWidget(share_);
+    share_->setObjectName(QStringLiteral("shareButton"));
     shareLayout->addWidget(new QLabel(QStringLiteral("连接码（包含访问密钥，请只交给可信设备）")));
     invitation_ = new QPlainTextEdit; invitation_->setReadOnly(true); invitation_->setMaximumHeight(125); invitation_->setPlaceholderText(QStringLiteral("开始共享后生成连接码")); shareLayout->addWidget(invitation_);
-    auto *copy = new QPushButton(QStringLiteral("复制连接码")); shareLayout->addWidget(copy); shareLayout->addStretch();
+    invitation_->setObjectName(QStringLiteral("sharingCode"));
+    auto *codeActions = new QHBoxLayout;
+    auto *copy = new QPushButton(QStringLiteral("复制连接码")); codeActions->addWidget(copy);
+    resetCode_ = new QPushButton(QStringLiteral("重置共享码")); resetCode_->setObjectName(QStringLiteral("resetSharingCode"));
+    resetCode_->setToolTip(QStringLiteral("生成新的访问凭据，旧共享码立即失效，并断开当前连接和文件传输"));
+    codeActions->addWidget(resetCode_); shareLayout->addLayout(codeActions); shareLayout->addStretch();
     // QTabWidget includes hidden pages in its minimum size. Let the sharing
     // form scroll so it cannot prevent the controller page from shrinking.
     auto *shareScroll = new QScrollArea; shareScroll->setWidgetResizable(true);
@@ -709,8 +744,23 @@ Window::Window() : host_(this), client_(this), controlWindow_(std::make_unique<C
     status_ = new QLabel(QStringLiteral("尚未共享或连接")); status_->setTextFormat(Qt::PlainText); status_->setWordWrap(true); status_->setStyleSheet("padding:9px;background:#edf3f8;color:#16324f;border-radius:5px"); layout->addWidget(status_);
     setCentralWidget(root);
     connect(share_, &QPushButton::clicked, this, [this] {
-        if (host_.running()) { host_.stop(); invitation_->clear(); share_->setText(QStringLiteral("开始共享")); addresses_->setEnabled(true); port_->setEnabled(true); allowControl_->setEnabled(true); allowFiles_->setEnabled(true); chooseFileDirectory_->setEnabled(true); fps_->setEnabled(true); codec_->setEnabled(true); showStatus(QStringLiteral("共享已停止，连接码已撤销")); }
+        if (host_.running()) { host_.stop(); invitation_->clear(); share_->setText(QStringLiteral("开始共享")); addresses_->setEnabled(true); port_->setEnabled(true); allowControl_->setEnabled(true); allowFiles_->setEnabled(true); chooseFileDirectory_->setEnabled(true); fps_->setEnabled(true); codec_->setEnabled(true); showStatus(QStringLiteral("共享已停止；共享码已保留，再次开始共享后可使用")); }
         else startHost(addresses_->currentText(), quint16(port_->value()));
+    });
+    connect(resetCode_, &QPushButton::clicked, this, [this] {
+        if (QMessageBox::question(this, QStringLiteral("重置共享码"),
+            QStringLiteral("重置后旧共享码将失效，当前远程连接和文件传输会断开。是否继续？"),
+            QMessageBox::Yes | QMessageBox::No, QMessageBox::No) != QMessageBox::Yes) return;
+        QString error;
+        if (!host_.resetSharingCode(error)) { showStatus(QStringLiteral("重置失败：") + error); return; }
+        invitation_->setPlainText(host_.invitation());
+        if (host_.running() && !inviteFile_.isEmpty()) {
+            QSaveFile file(inviteFile_);
+            const QByteArray code = host_.invitation().toUtf8();
+            if (!file.open(QIODevice::WriteOnly | QIODevice::Unbuffered) || !file.setPermissions(QFile::ReadOwner | QFile::WriteOwner) ||
+                file.write(code) != code.size() || !file.commit())
+                showStatus(QStringLiteral("共享码已重置，但连接码导出文件更新失败；请从窗口复制新码"));
+        }
     });
     connect(copy, &QPushButton::clicked, this, [this] { if (!invitation_->toPlainText().isEmpty()) ClipboardSync::setLocalOnlyText(invitation_->toPlainText()); });
     connect(connectButton, &QPushButton::clicked, this, &Window::connectCode);
@@ -810,18 +860,25 @@ void Window::configureFiles(const QString &directory, bool enabled) {
 }
 bool Window::startHost(const QString &bind, quint16 port, const QString &inviteFile) {
     const QString address = bind.isEmpty() ? addresses_->currentText() : bind;
+    const QString exportPath = inviteFile.isEmpty() ? inviteFile_ : inviteFile;
+    if (!port) port = quint16(port_->value());
     QString error;
     host_.configureVideo(fps_->currentData().toInt(), codec_->currentData().toString());
     host_.configureFiles(fileDirectory_->text(), allowFiles_->isChecked());
     if (!host_.start(QHostAddress(address), port, allowControl_->isChecked(), error)) { showStatus(error); return false; }
-    if (!inviteFile.isEmpty()) {
-        QSaveFile file(inviteFile);
-        if (!file.open(QIODevice::WriteOnly) || !file.setPermissions(QFile::ReadOwner | QFile::WriteOwner) ||
-            file.write(host_.invitation().toUtf8()) < 0 || !file.commit()) { host_.stop(); showStatus(QStringLiteral("无法安全保存连接码文件")); return false; }
+    if (!exportPath.isEmpty()) {
+        QSaveFile file(exportPath);
+        const QByteArray code = host_.invitation().toUtf8();
+        if (!file.open(QIODevice::WriteOnly | QIODevice::Unbuffered) || !file.setPermissions(QFile::ReadOwner | QFile::WriteOwner) ||
+            file.write(code) != code.size() || !file.commit()) { host_.stop(); showStatus(QStringLiteral("无法安全保存连接码文件")); return false; }
     }
-    invitation_->setPlainText(host_.invitation()); share_->setText(QStringLiteral("停止共享并撤销连接码"));
+    inviteFile_ = exportPath;
+    invitation_->setPlainText(host_.invitation()); share_->setText(QStringLiteral("停止共享"));
     if (addresses_->findText(address) < 0) addresses_->addItem(address);
     addresses_->setCurrentText(address); port_->setValue(port);
+    QSettings sharingSettings(QSettings::IniFormat, QSettings::UserScope, "bananaDesk", "bananaDesk");
+    sharingSettings.setValue(QStringLiteral("sharing/address"), address);
+    sharingSettings.setValue(QStringLiteral("sharing/port"), port);
     addresses_->setEnabled(false); port_->setEnabled(false); allowControl_->setEnabled(false); allowFiles_->setEnabled(false); chooseFileDirectory_->setEnabled(false); fps_->setEnabled(false); codec_->setEnabled(false); return true;
 }
 void Window::connectCode() {
