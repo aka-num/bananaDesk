@@ -33,7 +33,10 @@ case "$uid" in ''|*[!0-9]*) die 'uid 无效' ;; esac
 case "$gid" in ''|*[!0-9]*) die 'gid 无效' ;; esac
 case "$port" in ''|*[!0-9]*) die '端口无效' ;; esac
 [ "$port" -ge 1024 ] && [ "$port" -le 65535 ] || die '端口必须在 1024 到 65535 之间'
-case "$display" in :[0-9]*) ;; *) die '显示器必须是 :0、:1 等 X11 地址' ;; esac
+case "$display" in
+    :*) display_number=${display#:}; case "$display_number" in ''|*[!0-9]*) die '显示器必须是 :0、:1 等 X11 地址' ;; esac ;;
+    *) die '显示器必须是 :0、:1 等 X11 地址' ;;
+esac
 newline=$(printf '\012x'); newline=${newline%x}
 carriage=$(printf '\015x'); carriage=${carriage%x}
 for value in "$home" "$app" "$invite"; do

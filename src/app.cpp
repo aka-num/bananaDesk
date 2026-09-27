@@ -1043,7 +1043,14 @@ Window::Window() : host_(this, QDir(QStandardPaths::writableLocation(QStandardPa
     connect(viewer, &Viewer::presented, &client_, &Client::recordPaint);
     connect(&client_, &Client::statistics, controlWindow_.get(), &ControlWindow::setStatistics);
     connect(qApp, &QGuiApplication::applicationStateChanged, this, [this](Qt::ApplicationState state) { if (state != Qt::ApplicationActive) client_.release(); });
-    refreshSavedDevices(); refreshTrustedDevices();
+    refreshSavedDevices();
+#ifndef Q_OS_WIN
+    if (preloginServiceEnabled_) {
+        QString error;
+        if (!host_.reloadTrustedDevices(error)) showStatus(QStringLiteral("无法读取登录前服务的设备记录：") + error);
+    }
+#endif
+    refreshTrustedDevices();
 #ifndef Q_OS_WIN
     if (preloginServiceEnabled_) {
         share_->setEnabled(false);
