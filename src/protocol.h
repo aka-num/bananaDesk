@@ -10,7 +10,7 @@
 namespace ld {
 constexpr quint16 DefaultPort = 24832;
 constexpr quint32 MaxPacket = 8 * 1024 * 1024;
-enum class Packet : char { Auth = 'A', Welcome = 'W', Image = 'F', Ack = 'K', Input = 'I', Release = 'R', Wake = 'U', File = 'T', Clipboard = 'C', Ping = 'P', Pong = 'Q', Error = 'E' };
+enum class Packet : char { Auth = 'A', Welcome = 'W', Image = 'F', Ack = 'K', Input = 'I', Release = 'R', Wake = 'U', File = 'T', Clipboard = 'C', Ping = 'P', Pong = 'Q', Error = 'E', AuthChallenge = 'N', AuthResponse = 'S' };
 QByteArray json(const QJsonObject &object);
 bool object(const QByteArray &data, QJsonObject &out);
 bool equalSecret(const QByteArray &a, const QByteArray &b);
@@ -27,6 +27,8 @@ struct Invitation {
     quint16 port = DefaultPort;
     QString fingerprint;
     QString token;
+    QString deviceId;
+    bool passwordless = false;
     QString encode() const;
     static bool decode(const QString &text, Invitation &out, QString &error);
 };

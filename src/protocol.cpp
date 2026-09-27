@@ -77,7 +77,8 @@ bool Invitation::decode(const QString &text, Invitation &out, QString &error) {
         port < 1 || port > 65535 || !hex64.match(o.value("pin").toString()).hasMatch() || !hex48.match(o.value("token").toString()).hasMatch()) {
         error = QStringLiteral("连接码版本、IPv4 地址、端口或密钥无效"); return false;
     }
-    out = {host, quint16(port), o.value("pin").toString(), o.value("token").toString()};
+    out.host = host; out.port = quint16(port); out.fingerprint = o.value("pin").toString(); out.token = o.value("token").toString();
+    out.deviceId.clear(); out.passwordless = false;
     return true;
 }
 Wire::Wire(QSslSocket *socket, quint32 limit, QObject *parent) : QObject(parent), socket_(socket), receiveLimit_(limit) {

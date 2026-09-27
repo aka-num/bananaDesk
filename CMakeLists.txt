@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(bananaDesk VERSION 0.7.4 LANGUAGES CXX)
+project(bananaDesk VERSION 0.7.6 LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_AUTOMOC ON)
@@ -21,6 +21,7 @@ target_sources(landesk_core PRIVATE src/desktop_wake.cpp src/desktop_wake.h)
 target_sources(landesk_core PRIVATE src/file_transfer.cpp src/file_transfer.h src/file_transfer_dialog.cpp src/file_transfer_dialog.h)
 target_sources(landesk_core PRIVATE src/clipboard_sync.cpp src/clipboard_sync.h)
 target_sources(landesk_core PRIVATE src/identity_store.cpp src/identity_store.h)
+target_sources(landesk_core PRIVATE src/device_store.cpp src/device_store.h)
 target_link_libraries(landesk_core PUBLIC Qt${QT_VERSION_MAJOR}::Widgets Qt${QT_VERSION_MAJOR}::Network OpenSSL::Crypto)
 find_package(PkgConfig QUIET)
 option(LANDESK_ENABLE_H264 "Enable FFmpeg/libx264 video when dependencies are available" ON)
@@ -129,4 +130,10 @@ install(TARGETS landesk RUNTIME DESTINATION bin)
 if(UNIX AND NOT APPLE)
   install(FILES assets/bananaDesk.png DESTINATION share/icons/hicolor/512x512/apps)
   install(FILES linux/bananaDesk.desktop DESTINATION share/applications)
+  install(PROGRAMS
+    linux/install-prelogin.sh
+    linux/uninstall-prelogin.sh
+    linux/bananaDesk-prelogin-xauth
+    linux/bananaDesk-prelogin-launch
+    DESTINATION share/bananaDesk/linux)
 endif()

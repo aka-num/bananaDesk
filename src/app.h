@@ -1,6 +1,7 @@
 #pragma once
 #include "protocol.h"
 #include "identity_store.h"
+#include "device_store.h"
 #include "native_input.h"
 #include "video_pipeline.h"
 #include "file_transfer.h"
@@ -45,11 +46,15 @@ public:
     bool resetSharingCode(QString &error);
     QString invitation() const;
     bool running() const { return server_.isListening(); }
+    QList<TrustedDevice> trustedDevices() const { return trustedDevices_; }
+    bool reloadTrustedDevices(QString &error);
+    bool forgetTrustedDevice(const QString &id, QString &error);
     void configureVideo(int fps, const QString &codec) { targetFps_ = fps; codecPreference_ = codec; }
     void setLockOnDisconnect(bool enabled) { lockOnDisconnect_ = enabled; }
     void configureFiles(const QString &root, bool enabled) { fileRoot_ = root; filesEnabled_ = enabled; }
     FileTransferHost *fileTransfer() { return &files_; }
 signals: void status(QString text);
+    void trustedDevicesChanged();
     void desktopLockRequested();
     void produceFrame(quint64 generation, bool useHelper);
     void encodeFrame(quint64 generation, QImage image, QRect bounds, QString codec, int fps, double captureMs, QString backend);
@@ -62,9 +67,13 @@ private:
                  double captureMs, double encodeMs, QString backend);
     void drop(const QString &reason);
     void releaseInput();
+    void completeAuthentication(const QJsonObject &options, const QString &deviceId = {}, const QString &deviceName = {});
     Listener server_;
     Identity identity_;
     std::unique_ptr<IdentityStore> identityStore_;
+    std::unique_ptr<TrustedDeviceStore> trustedStore_;
+    QList<TrustedDevice> trustedDevices_;
+    QString activeDeviceId_;
     NativeInput input_;
     QHostAddress address_;
     QSslSocket *socket_ = nullptr;
@@ -92,11 +101,15 @@ private:
     bool clipboardAllowed_ = false;
     QString fileRoot_;
     bool filesEnabled_ = false, filesAllowed_ = false, fileOffersAllowed_ = false;
+    bool authChallengePending_ = false;
+    QString pendingDeviceId_;
+    QJsonObject pendingAuthOptions_;
+    QByteArray pendingChallenge_;
 };
 class Client : public QObject {
     Q_OBJECT
 public:
-    explicit Client(QObject *parent);
+    explicit Client(QObject *parent, const QString &deviceDirectory = {});
     ~Client() override;
     void start(const Invitation &invitation);
     void stop();
@@ -113,11 +126,13 @@ signals:
     void loginScreenCapability(bool enabled);
     void disconnected();
     void statistics(QString text);
+    void deviceAuthenticated(QString deviceId, QString deviceName, QString host, quint16 port, QString fingerprint);
     void decodeFrame(quint64 generation, QString codec, QByteArray bytes);
 private:
     void receive(Packet type, const QByteArray &payload);
     void fail(const QString &message);
     void reportStats();
+    void sendAuth();
     QSslSocket *socket_ = nullptr;
     Wire *wire_ = nullptr;
     Invitation invitation_;
@@ -135,6 +150,10 @@ private:
     QElapsedTimer lastMessage_;
     bool ready_ = false;
     bool control_ = false, loginScreen_ = false, wakePending_ = false;
+    bool resumeAuth_ = false;
+    DeviceIdentity deviceIdentity_;
+    std::unique_ptr<DeviceIdentityStore> deviceStore_;
+    QString deviceName_;
     FileTransferClient files_;
     ClipboardSync clipboard_;
 };
@@ -218,12 +237,18 @@ public:
 protected: void closeEvent(QCloseEvent *) override;
 private:
     void connectCode();
+    void connectSavedDevice();
+    void refreshSavedDevices();
+    void refreshTrustedDevices();
+    bool setAutostart(bool enabled, QString &error);
     void showStatus(const QString &text);
     void updateHostFileActions();
     void chooseHostFile();
     void receiveFileOffer(const QString &id, const QString &name, qint64 size);
     Host host_;
     Client client_;
+    std::unique_ptr<DeviceProfileStore> profileStore_;
+    QList<SavedDevice> savedDeviceRecords_;
     QComboBox *addresses_;
     QSpinBox *port_;
     QComboBox *fps_, *codec_;
@@ -231,9 +256,15 @@ private:
     QCheckBox *lockOnDisconnect_;
     QPushButton *share_;
     QPushButton *resetCode_;
+    QCheckBox *autostart_;
+    QComboBox *trustedDevices_;
+    QPushButton *forgetTrusted_;
     QString inviteFile_;
+    bool preloginServiceEnabled_ = false;
     QPlainTextEdit *invitation_;
     QPlainTextEdit *connectCode_;
+    QComboBox *savedDevices_;
+    QPushButton *connectSaved_, *forgetSaved_;
     QLabel *status_;
     QTabWidget *tabs_;
     std::unique_ptr<ControlWindow> controlWindow_;

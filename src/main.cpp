@@ -55,13 +55,15 @@ int main(int argc, char **argv) {
     QApplication::setAttribute(Qt::AA_DisableHighDpiScaling);
 #endif
     QApplication app(argc, argv);
-    QCoreApplication::setApplicationName("bananaDesk"); QCoreApplication::setApplicationVersion("0.7.4");
+    QCoreApplication::setApplicationName("bananaDesk"); QCoreApplication::setApplicationVersion("0.7.6");
     QGuiApplication::setDesktopFileName("bananaDesk");
     QApplication::setWindowIcon(QIcon(QStringLiteral(":/branding/bananaDesk.png")));
     qRegisterMetaType<quint64>("quint64");
     QCommandLineParser parser; parser.setApplicationDescription(QStringLiteral("局域网远程桌面，TLS 指纹验证与可手动重置的固定共享码"));
     parser.addHelpOption(); parser.addVersionOption();
     parser.addOption({"host", "Start sharing after opening the window"});
+    parser.addOption({"autostart", "Started by the per-user login autostart entry"});
+    parser.addOption({"prelogin-host", "Linux only: share the X11 display-manager login screen"});
     parser.addOption({"view-only", "Allow viewing only when sharing"});
     parser.addOption({"no-lock-on-disconnect", "Do not lock the host desktop when an authenticated session ends"});
     parser.addOption({"no-file-transfer", "Disable file transfer when sharing"});
@@ -76,6 +78,13 @@ int main(int argc, char **argv) {
     parser.addOption({"log-file", "Write diagnostic messages (no invitation or input content)", "path"});
     parser.addOption({"diagnostics-file", "Check runtime dependencies, write JSON and exit", "path"});
     parser.process(app);
+#ifdef Q_OS_WIN
+    if (parser.isSet("prelogin-host"))
+        return startupFailure(QStringLiteral("--prelogin-host 仅支持 Linux X11/systemd，被控端 Windows 不支持登录前远控"), false);
+#else
+    if (parser.isSet("prelogin-host") && !parser.isSet("host"))
+        return startupFailure(QStringLiteral("--prelogin-host 必须和 --host 一起使用"), false);
+#endif
     QString logPath = parser.value("log-file");
 #ifdef Q_OS_WIN
     if (logPath.isEmpty()) {
@@ -118,13 +127,15 @@ int main(int argc, char **argv) {
     window.configureVideo(fps, codec); window.setStatsFile(parser.value("stats-file"));
     if (parser.isSet("view-only")) window.setViewOnly();
     if (parser.isSet("no-lock-on-disconnect")) window.setLockOnDisconnect(false);
-    window.show();
+    const bool headlessHost = parser.isSet("prelogin-host");
+    if (!headlessHost) window.show();
     std::signal(SIGINT, onSignal); std::signal(SIGTERM, onSignal);
     QTimer terminationTimer;
     QObject::connect(&terminationTimer, &QTimer::timeout, &app, [&] { if (interrupted) app.quit(); });
     terminationTimer.start(100);
     QTimer::singleShot(0, &window, [&] {
         if (parser.isSet("host") && !window.startHost(parser.value("bind"), parser.isSet("port") ? quint16(port) : 0, parser.value("invite-file"))) { app.exit(2); return; }
+        if (parser.isSet("autostart") && parser.isSet("host")) window.hide();
         if (parser.isSet("connect-file")) window.connectFile(parser.value("connect-file"));
     });
     return app.exec();

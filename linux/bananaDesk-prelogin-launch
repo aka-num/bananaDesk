@@ -1,0 +1,13 @@
+#!/bin/sh
+set -eu
+
+: "${BANANADESK_EXEC:?BANANADESK_EXEC is required}"
+: "${BANANADESK_BIND:?BANANADESK_BIND is required}"
+: "${BANANADESK_PORT:?BANANADESK_PORT is required}"
+: "${BANANADESK_INVITE:?BANANADESK_INVITE is required}"
+
+exec "$BANANADESK_EXEC" \
+    --host --autostart --prelogin-host \
+    --bind "$BANANADESK_BIND" --port "$BANANADESK_PORT" \
+    --invite-file "$BANANADESK_INVITE" \
+    --no-file-transfer --no-lock-on-disconnect

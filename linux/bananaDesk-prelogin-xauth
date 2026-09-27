@@ -1,0 +1,51 @@
+#!/bin/sh
+set -eu
+
+uid=
+gid=
+display=:0
+output=
+
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --uid) uid=${2-}; shift 2 ;;
+        --gid) gid=${2-}; shift 2 ;;
+        --display) display=${2-}; shift 2 ;;
+        --output) output=${2-}; shift 2 ;;
+        *) echo "unknown option: $1" >&2; exit 64 ;;
+    esac
+done
+
+case "$uid" in ''|*[!0-9]*) echo 'invalid uid' >&2; exit 64;; esac
+case "$gid" in ''|*[!0-9]*) echo 'invalid gid' >&2; exit 64;; esac
+case "$display" in :[0-9]*) ;; *) echo 'invalid display' >&2; exit 64;; esac
+[ -n "$output" ] || { echo 'missing output' >&2; exit 64; }
+[ "$(id -u)" -eq 0 ] || { echo 'xauth helper must run as root' >&2; exit 77; }
+
+# Display-manager cookies are placed in different locations by GDM, LightDM
+# and SDDM. Search only the usual runtime/state directories and accept the
+# first regular file that contains a cookie for the requested display.
+candidate=
+for root in /run/user/*/gdm /run/gdm3 /run/gdm /run/lightdm /run/sddm /var/lib/gdm3 /var/lib/gdm /var/lib/lightdm /var/lib/sddm /var/run/gdm3; do
+    [ -d "$root" ] || continue
+    while IFS= read -r path; do
+        [ -f "$path" ] || continue
+        if command -v xauth >/dev/null 2>&1; then
+            entries=$(xauth -f "$path" list "$display" 2>/dev/null || true)
+            if [ -n "$entries" ]; then candidate=$path; break; fi
+        else
+            candidate=$path; break
+        fi
+    done <<EOF
+$(find "$root" -xdev -type f \( -name Xauthority -o -name database \) -print 2>/dev/null)
+EOF
+    [ -n "$candidate" ] && break
+done
+
+[ -n "$candidate" ] || { echo "no X11 authorization cookie for $display" >&2; exit 75; }
+mkdir -p "$(dirname "$output")"
+tmp="${output}.tmp.$$"
+trap 'rm -f "$tmp"' EXIT HUP INT TERM
+install -o "$uid" -g "$gid" -m 0600 "$candidate" "$tmp"
+mv -f "$tmp" "$output"
+trap - EXIT HUP INT TERM
