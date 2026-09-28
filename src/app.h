@@ -67,13 +67,14 @@ private:
                  double captureMs, double encodeMs, QString backend);
     void drop(const QString &reason);
     void releaseInput();
-    void completeAuthentication(const QJsonObject &options, const QString &deviceId = {}, const QString &deviceName = {});
+    void completeAuthentication(QJsonObject options, const QString &deviceId = {}, const QString &deviceName = {});
     Listener server_;
     Identity identity_;
     std::unique_ptr<IdentityStore> identityStore_;
     std::unique_ptr<TrustedDeviceStore> trustedStore_;
     QList<TrustedDevice> trustedDevices_;
     QString activeDeviceId_;
+    QString pairingError_;
     NativeInput input_;
     QHostAddress address_;
     QSslSocket *socket_ = nullptr;
@@ -154,6 +155,7 @@ private:
     DeviceIdentity deviceIdentity_;
     std::unique_ptr<DeviceIdentityStore> deviceStore_;
     QString deviceName_;
+    QString deviceStorageError_;
     FileTransferClient files_;
     ClipboardSync clipboard_;
 };
@@ -225,7 +227,7 @@ private:
 class Window : public QMainWindow {
     Q_OBJECT
 public:
-    explicit Window();
+    explicit Window(bool headlessHost = false);
     ~Window() override;
     bool startHost(const QString &bind = {}, quint16 port = 0, const QString &inviteFile = {});
     void setViewOnly() { allowControl_->setChecked(false); }
@@ -276,5 +278,7 @@ private:
     QLabel *hostFileStatus_;
     QProgressBar *hostFileProgress_;
     QPointer<QFileDialog> hostFileDialog_, incomingFileDialog_;
+    bool headlessHost_ = false;
+    bool autostartChanging_ = false;
 };
 }

@@ -10,6 +10,7 @@
 #include <QRegularExpression>
 #include <QSaveFile>
 #include <QUuid>
+#include <utility>
 #include <openssl/evp.h>
 #include <openssl/hmac.h>
 #include <openssl/rand.h>
@@ -101,7 +102,13 @@ bool readFile(const QString &path, QByteArray &plain, QString &error) {
         error = QStringLiteral("设备记录必须是当前用户拥有的普通文件"); return false;
     }
 #else
-    if (QFileInfo(path).isSymLink() || (QFileInfo(path).exists() && !QFileInfo(path).isFile())) {
+    const DWORD attributes = GetFileAttributesW(reinterpret_cast<LPCWSTR>(path.utf16()));
+    if (attributes == INVALID_FILE_ATTRIBUTES) {
+        const DWORD reason = GetLastError();
+        if (reason == ERROR_FILE_NOT_FOUND || reason == ERROR_PATH_NOT_FOUND) { plain.clear(); return true; }
+        error = QStringLiteral("无法读取设备记录（错误 %1）").arg(reason); return false;
+    }
+    if ((attributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) || !QFileInfo(path).isFile()) {
         error = QStringLiteral("设备记录必须是普通文件"); return false;
     }
 #endif
@@ -184,11 +191,14 @@ bool DeviceIdentityStore::loadOrCreate(DeviceIdentity &out, QString &error) {
     QByteArray bytes;
     if (!readFile(filePath(), bytes, error)) return false;
     if (bytes.isEmpty()) {
-        out.id = QUuid::createUuid().toString(QUuid::WithoutBraces).remove('-');
-        out.secret = randomBytes(32);
-        if (!out.valid()) { error = QStringLiteral("无法生成控制设备凭据"); return false; }
-        const QByteArray data = json({{"v", 1}, {"id", out.id}, {"secret", QString::fromLatin1(out.secret.toHex())}});
-        return writeFile(directory_, filePath(), data, error);
+        DeviceIdentity candidate;
+        candidate.id = QUuid::createUuid().toString(QUuid::WithoutBraces).remove('-');
+        candidate.secret = randomBytes(32);
+        if (!candidate.valid()) { error = QStringLiteral("无法生成控制设备凭据"); return false; }
+        const QByteArray data = json({{"v", 1}, {"id", candidate.id}, {"secret", QString::fromLatin1(candidate.secret.toHex())}});
+        if (!writeFile(directory_, filePath(), data, error)) return false;
+        out = std::move(candidate);
+        return true;
     }
     QJsonObject o; if (!object(bytes, o) || o.value("v").toInt() != 1 || !validHex(o.value("id").toString(), 32)
         || !validHex(o.value("secret").toString(), 64)) { error = QStringLiteral("控制设备凭据损坏，请重新配对"); return false; }

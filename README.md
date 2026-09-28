@@ -21,7 +21,7 @@ bananaDesk makes it convenient for individuals to manage their computers across 
 - A separate, resizable control window, with a fullscreen mode that shows only the remote desktop.
 - Automatic two-way plain-text clipboard synchronization.
 - Persistent connection codes with manual reset: reuse a code after restarting sharing under the same OS user, IP address and port; reset invalidates the old code.
-- Optional Linux boot sharing through a systemd service on X11, including access to the login screen before the user signs in; paired controllers can reconnect without re-entering the bananaDesk code. Windows autostart still starts after the Windows user logs in.
+- Optional Linux boot sharing through a systemd service on X11, including access to the login screen before the user signs in; paired controllers can reconnect without re-entering the bananaDesk code. If sharing is already active, enabling the Linux boot-sharing switch only schedules the service for the next boot and leaves the current session running. Windows autostart still starts after the Windows user logs in.
 - File uploads and downloads, plus files actively sent by the computer being controlled.
 
 The Linux computer being controlled requires **X11 + systemd** for pre-login sharing; Wayland is not supported. The optional switch is off by default and enabling it asks for administrator authorization. It shares under the normal user account and still requires the real Linux password or PIN at the login screen. This path has not been verified by rebooting a physical computer. Encrypted home directories, multi-seat setups, displays other than `:0`, and unusual display-manager layouts may not work. Set a DHCP address reservation in your router if the host IP must remain stable; bananaDesk does not configure the router or firewall. Windows does not support pre-login sharing in this release. Windows packages target Intel/AMD 64-bit devices. The current Linux package is built for Ubuntu 22.04/X11 and is not a universal installer for every distribution. The project is still evolving, and compatibility and performance need more validation across real devices.
@@ -56,7 +56,7 @@ bananaDesk 方便个人在 Windows 和 Linux 之间操作自己的电脑。
 - 独立控制窗口，可调整大小，也可切换到只显示远程画面的全屏模式。
 - 自动双向纯文本剪贴板同步。
 - 固定共享码与手动重置：同一系统用户、IP 和端口下，重新开启共享可继续用原码；重置使旧码失效。
-- Linux 可选的开机自动共享：在 X11 + systemd 下，登录前即可尝试连接系统登录界面；首次输入共享码配对后，可信控制端可以免输 bananaDesk 共享码连接。Windows 仍只支持用户登录后的自动共享。
+- Linux 可选的开机自动共享：在 X11 + systemd 下，登录前即可尝试连接系统登录界面；首次输入共享码配对后，可信控制端可以免输 bananaDesk 共享码连接。共享过程中勾选开机自动共享只安排下次开机接管，不会中断当前共享。Windows 仍只支持用户登录后的自动共享。
 - 文件上传、下载，以及被控端主动选择文件发送给控制端。
 
 Linux 登录前共享仅支持 **X11 + systemd**，暂不支持 Wayland。界面里的“开机后自动启动共享（登录前可连接）”默认关闭，启用时会请求一次管理员授权。服务以当前普通用户身份运行，复用共享码和已认证设备记录；仍须在真实 Linux 登录界面输入系统密码或 PIN，程序不保存密码、不绕过系统认证。物理机重启和真实登录界面尚未验收；加密 home、多 seat、非 `:0` 显示器或特殊登录管理器可能不兼容。希望重启后地址稳定时，建议在路由器中为被控端设置 DHCP 地址保留；程序不会自动配置路由器或防火墙。IP 改变后，需要在控制端更新连接记录。Windows 被控端不支持登录前远控。Windows 发布包面向 Intel／AMD 64 位设备，Linux 发布包目前针对 Ubuntu 22.04／X11 构建，并非适用于所有发行版的通用安装包。项目仍在迭代，跨设备兼容性和性能还需要更多实际使用验证。

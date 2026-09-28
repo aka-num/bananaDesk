@@ -1,4 +1,5 @@
 #include "identity_store.h"
+#include "device_store.h"
 #include <QDateTime>
 #include <QDir>
 #include <QFile>
@@ -85,6 +86,57 @@ bool changeCertificateDates(QJsonObject &record, int fromYears, int untilYears) 
 class IdentityStoreTest : public QObject {
     Q_OBJECT
 private slots:
+    void deviceStoresSupportFirstUseAndReload() {
+        QTemporaryDir temp; QVERIFY(temp.isValid());
+        QString error;
+        const QString directory = temp.filePath("new-controller");
+        ld::DeviceIdentity identity;
+        ld::DeviceIdentityStore store(directory);
+        QVERIFY2(store.loadOrCreate(identity, error), qPrintable(error));
+        QVERIFY(identity.valid());
+        ld::DeviceIdentity reloaded;
+        QVERIFY2(ld::DeviceIdentityStore(directory).loadOrCreate(reloaded, error), qPrintable(error));
+        QCOMPARE(reloaded.id, identity.id); QCOMPARE(reloaded.secret, identity.secret);
+#ifdef Q_OS_WIN
+        const auto sealed = readFile(store.filePath());
+        QVERIFY(sealed.startsWith("bananaDesk-device-dpapi-v1\n"));
+        QVERIFY(!sealed.contains(identity.secret.toHex()));
+#endif
+        ld::TrustedDeviceStore trusted(temp.filePath("new-host"));
+        QList<ld::TrustedDevice> controllers;
+        QVERIFY2(trusted.load(controllers, error), qPrintable(error));
+        QVERIFY(controllers.isEmpty());
+        const QString fingerprint(64, 'a');
+        const auto now = QDateTime::currentDateTimeUtc();
+        QVERIFY2(trusted.upsert({identity.id, "controller", identity.secret, fingerprint, now, now}, error), qPrintable(error));
+        QVERIFY2(trusted.load(controllers, error), qPrintable(error));
+        QCOMPARE(controllers.size(), 1); QCOMPARE(controllers.first().secret, identity.secret);
+
+        ld::DeviceProfileStore profiles(temp.filePath("new-connections"));
+        QList<ld::SavedDevice> connections;
+        QVERIFY2(profiles.load(connections, error), qPrintable(error));
+        QVERIFY(connections.isEmpty());
+        ld::SavedDevice saved;
+        saved.deviceId = identity.id; saved.name = "remote-host";
+        saved.invitation.host = "127.0.0.1"; saved.invitation.port = 24832;
+        saved.invitation.fingerprint = fingerprint; saved.lastConnected = now;
+        QVERIFY2(profiles.upsert(saved, error), qPrintable(error));
+        QVERIFY2(profiles.load(connections, error), qPrintable(error));
+        QCOMPARE(connections.size(), 1); QCOMPARE(connections.first().deviceId, identity.id);
+        QVERIFY(connections.first().invitation.token.isEmpty());
+    }
+
+    void failedDeviceIdentitySaveDoesNotProduceUsableCredentials() {
+        QTemporaryDir temp; QVERIFY(temp.isValid());
+        // A regular file cannot become a credential directory on either OS.
+        const QString blocked = temp.filePath("not-a-directory");
+        QVERIFY(writeFile(blocked, "keep"));
+        ld::DeviceIdentity identity; QString error;
+        QVERIFY(!ld::DeviceIdentityStore(blocked).loadOrCreate(identity, error));
+        QVERIFY(!error.isEmpty()); QVERIFY(!identity.valid());
+        QCOMPARE(readFile(blocked), QByteArray("keep"));
+    }
+
     void stableAcrossStopAndStoreRecreation() {
         QTemporaryDir temp; QVERIFY(temp.isValid());
         ld::Identity first; QString error;

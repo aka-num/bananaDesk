@@ -55,7 +55,7 @@ int main(int argc, char **argv) {
     QApplication::setAttribute(Qt::AA_DisableHighDpiScaling);
 #endif
     QApplication app(argc, argv);
-    QCoreApplication::setApplicationName("bananaDesk"); QCoreApplication::setApplicationVersion("0.7.6");
+    QCoreApplication::setApplicationName("bananaDesk"); QCoreApplication::setApplicationVersion("0.7.7");
     QGuiApplication::setDesktopFileName("bananaDesk");
     QApplication::setWindowIcon(QIcon(QStringLiteral(":/branding/bananaDesk.png")));
     qRegisterMetaType<quint64>("quint64");
@@ -122,7 +122,7 @@ int main(int argc, char **argv) {
     }
     if (codec == "h264" && !h264Available) return startupFailure(QStringLiteral("H.264 编码或解码不可用，请重新完整解压运行包"));
     if (!tlsAvailable) return startupFailure(QStringLiteral("TLS 不可用，请重新完整解压运行包，确认 OpenSSL DLL 未缺失"));
-    ld::Window window;
+    ld::Window window(parser.isSet("prelogin-host"));
     window.configureFiles(parser.value("transfer-dir"), !parser.isSet("no-file-transfer"));
     window.configureVideo(fps, codec); window.setStatsFile(parser.value("stats-file"));
     if (parser.isSet("view-only")) window.setViewOnly();

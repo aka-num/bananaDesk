@@ -107,6 +107,83 @@ private slots:
         client.stop(); restarted.stop();
     }
 
+    void pairedDeviceReconnectsAfterBothProcessesRestart() {
+        QTemporaryDir temp; QVERIFY(temp.isValid());
+        const auto hostDirectory = temp.filePath("host");
+        const auto clientDirectory = temp.filePath("controller");
+        QString error; ld::Invitation invitation;
+        {
+            ld::Host host(nullptr, hostDirectory); configure(host);
+            QVERIFY2(host.start(QHostAddress::LocalHost, 0, false, error), qPrintable(error));
+            QVERIFY(ld::Invitation::decode(host.invitation(), invitation, error));
+            ld::Client client(nullptr, clientDirectory);
+            QSignalSpy paired(&client, &ld::Client::deviceAuthenticated), frames(&client, &ld::Client::frame);
+            QSignalSpy status(&client, &ld::Client::status);
+            client.start(invitation);
+            QTRY_VERIFY2_WITH_TIMEOUT(!frames.isEmpty(), qPrintable(messages(status)), 8000);
+            QCOMPARE(paired.count(), 1);
+            QCOMPARE(host.trustedDevices().size(), 1);
+            invitation.deviceId = paired.first()[0].toString();
+            QCOMPARE(host.trustedDevices().first().id, invitation.deviceId);
+            client.stop(); host.stop();
+        }
+        invitation.passwordless = true; invitation.token.clear();
+        ld::Host restarted(nullptr, hostDirectory); configure(restarted);
+        QVERIFY2(restarted.start(QHostAddress::LocalHost, invitation.port, false, error), qPrintable(error));
+        ld::Client client(nullptr, clientDirectory);
+        QSignalSpy paired(&client, &ld::Client::deviceAuthenticated), frames(&client, &ld::Client::frame);
+        QSignalSpy status(&client, &ld::Client::status), disconnected(&client, &ld::Client::disconnected);
+        client.start(invitation);
+        QTRY_VERIFY2_WITH_TIMEOUT(!frames.isEmpty(), qPrintable(messages(status)), 8000);
+        QCOMPARE(paired.count(), 1);
+        client.stop();
+        QTRY_VERIFY_WITH_TIMEOUT(!hostHasPeer(restarted), 3000);
+        QVERIFY2(restarted.forgetTrustedDevice(invitation.deviceId, error), qPrintable(error));
+        paired.clear(); frames.clear(); client.start(invitation); disconnected.clear();
+        QTRY_VERIFY_WITH_TIMEOUT(!disconnected.isEmpty(), 5000);
+        QVERIFY(paired.isEmpty() && frames.isEmpty());
+    }
+
+    void failedHostPairingIsNotReportedAsSaved() {
+        QTemporaryDir temp; QVERIFY(temp.isValid());
+        const auto hostDirectory = temp.filePath("host");
+        ld::Host host(nullptr, hostDirectory); configure(host);
+        QString error; ld::Invitation invitation;
+        QVERIFY2(host.start(QHostAddress::LocalHost, 0, false, error), qPrintable(error));
+        QVERIFY(ld::Invitation::decode(host.invitation(), invitation, error));
+        // Leave identity storage intact but prevent writing the trusted list.
+        QVERIFY(QDir().mkdir(QDir(hostDirectory).filePath("trusted-devices-v1.dat")));
+        ld::Client client(nullptr, temp.filePath("controller"));
+        QSignalSpy paired(&client, &ld::Client::deviceAuthenticated), frames(&client, &ld::Client::frame);
+        QSignalSpy status(&client, &ld::Client::status);
+        client.start(invitation);
+        QTRY_VERIFY2_WITH_TIMEOUT(!frames.isEmpty(), qPrintable(messages(status)), 8000);
+        QVERIFY(paired.isEmpty()); QVERIFY(host.trustedDevices().isEmpty());
+        QVERIFY(messages(status).contains(QStringLiteral("未保存免密设备")));
+        client.stop();
+    }
+
+#ifndef Q_OS_WIN
+    void headlessHostCanStartWhileServiceIsActive() {
+        QTemporaryDir temp; QVERIFY(temp.isValid());
+        QFile command(temp.filePath("systemctl"));
+        QVERIFY(command.open(QIODevice::WriteOnly));
+        // Simulate the service's own is-active/is-enabled status, without
+        // touching systemd or any real sharing session.
+        command.write("#!/bin/sh\nexit 0\n"); command.close();
+        QVERIFY(command.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
+        struct RestorePath { QByteArray value = qgetenv("PATH"); ~RestorePath() { qputenv("PATH", value); } } restore;
+        qputenv("PATH", QFile::encodeName(temp.path()) + ':' + restore.value);
+        ld::Window window(true);
+        window.setViewOnly(); window.setLockOnDisconnect(false); window.configureVideo(15, "jpeg");
+        QTcpServer reservation; reservation.setProxy(QNetworkProxy::NoProxy);
+        QVERIFY(reservation.listen(QHostAddress::LocalHost, 0));
+        const auto port = reservation.serverPort(); reservation.close();
+        QVERIFY(window.startHost("127.0.0.1", port));
+        QVERIFY(window.findChild<ld::Host *>()->running());
+    }
+#endif
+
     void resetDisconnectsAndRejectsBothOldSecrets() {
         QTemporaryDir profile; QVERIFY(profile.isValid());
         ld::Host host(nullptr, profile.path()); configure(host);

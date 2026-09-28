@@ -2,7 +2,7 @@
 set -eu
 
 usage() {
-    echo "Usage: $0 --user USER --uid UID --gid GID --home HOME --exec PATH --bind IPV4 --port PORT --invite-file PATH [--display :0]" >&2
+    echo "Usage: $0 --user USER --uid UID --gid GID --home HOME --exec PATH --bind IPV4 --port PORT --invite-file PATH [--display :0] [--defer-start]" >&2
     exit 64
 }
 die() { echo "bananaDesk 登录前服务：$*" >&2; exit 64; }
@@ -10,8 +10,13 @@ die() { echo "bananaDesk 登录前服务：$*" >&2; exit 64; }
 [ "$(id -u)" -eq 0 ] || { echo '请通过 pkexec 运行此安装程序' >&2; exit 77; }
 command -v systemctl >/dev/null 2>&1 || die '当前系统没有 systemctl'
 
-user= uid= gid= home= app= bind= port= invite= display=:0
+user= uid= gid= home= app= bind= port= invite= display=:0 defer_start=0
 while [ "$#" -gt 0 ]; do
+    if [ "$1" = --defer-start ]; then
+        defer_start=1
+        shift
+        continue
+    fi
     [ "$#" -ge 2 ] || usage
     case "$1" in
         --user) user=$2; shift 2 ;;
@@ -117,5 +122,8 @@ chown root:root "$tmp_unit"
 mv -f "$tmp_unit" "$unit"
 trap - EXIT HUP INT TERM
 systemctl daemon-reload
-systemctl enable --now bananaDesk-prelogin.service
+systemctl enable bananaDesk-prelogin.service
+if [ "$defer_start" -eq 0 ]; then
+    systemctl start bananaDesk-prelogin.service
+fi
 echo 'bananaDesk Linux 登录前共享服务已启用'

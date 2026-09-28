@@ -40,6 +40,7 @@
 #include <QHostInfo>
 #include <QRegularExpression>
 #include <QProcess>
+#include <QEventLoop>
 #include <algorithm>
 #ifndef Q_OS_WIN
 #include <pwd.h>
@@ -56,8 +57,10 @@ static QSslConfiguration tlsConfig() {
 static QString legacyAutostartPath() {
     return QDir(QStandardPaths::writableLocation(QStandardPaths::ConfigLocation)).filePath("autostart/bananaDesk.desktop");
 }
-static QString preloginServicePath() {
-    return QStringLiteral("/etc/systemd/system/bananaDesk-prelogin.service");
+static bool preloginServiceState(const QString &operation) {
+    QProcess process;
+    process.start(QStringLiteral("systemctl"), {operation, QStringLiteral("--quiet"), QStringLiteral("bananaDesk-prelogin.service")});
+    return process.waitForFinished(3000) && process.exitStatus() == QProcess::NormalExit && process.exitCode() == 0;
 }
 static QString preloginInvitationPath() {
     return QDir(QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation))
@@ -89,7 +92,7 @@ static bool autostartConfigured() {
 #else
     // Linux autostart is a system service so it can attach to the display
     // manager's X11 greeter before the user logs in.
-    return QFileInfo::exists(preloginServicePath());
+    return preloginServiceState(QStringLiteral("is-enabled"));
 #endif
 }
 #ifdef Q_OS_WIN
@@ -276,7 +279,7 @@ void Host::accept(qintptr descriptor) {
     lastMessage_.start(); packetWindow_.start(); packets_ = 0;
     socket_->startServerEncryption();
 }
-void Host::completeAuthentication(const QJsonObject &o, const QString &deviceId, const QString &deviceName) {
+void Host::completeAuthentication(QJsonObject o, const QString &deviceId, const QString &deviceName) {
     const auto codecs = o.value("codecs").toArray();
     codec_ = codecPreference_ != "jpeg" && codecs.contains("h264") && VideoEncoder::available() ? "h264" : "jpeg";
     if (codecPreference_ == "h264" && codec_ != "h264") { drop(QStringLiteral("对端未提供 H.264 支持")); return; }
@@ -289,7 +292,8 @@ void Host::completeAuthentication(const QJsonObject &o, const QString &deviceId,
     clipboardAllowed_ = control_ && o.value("clipboard").toBool(false);
     fileOffersAllowed_ = filesAllowed_ && o.value("file_offer").toBool(false);
     if (filesAllowed_ || clipboardAllowed_) wire_->setReceiveLimit(qMax(MaxFilePayload, MaxClipboardBytes) + 1);
-    const QString suffix = deviceId.isEmpty() ? QString() : QStringLiteral(" · 已记录设备：%1").arg(deviceName.isEmpty() ? deviceId.left(8) : deviceName);
+    const QString suffix = deviceId.isEmpty() ? QStringLiteral(" · 未记录设备：") + pairingError_
+        : QStringLiteral(" · 已记录设备：%1").arg(deviceName.isEmpty() ? deviceId.left(8) : deviceName);
     emit status(QStringLiteral("已连接：%1 · %2").arg(socket_->peerAddress().toString(), control_ ? QStringLiteral("允许键鼠控制") : QStringLiteral("仅观看")) + suffix);
     capture();
 }
@@ -327,6 +331,7 @@ void Host::receive(Packet type, const QByteArray &payload) {
             drop(QStringLiteral("连接验证失败 · 等待连接")); return;
         }
         const QString deviceId = o.value("device_id").toString();
+        pairingError_ = QStringLiteral("控制端未提供持久设备凭据，请更新控制端后重新连接");
         if (o.value("resume").toBool(false)) {
             TrustedDevice item; QString findError;
             if (!trustedStore_ || !trustedStore_->find(deviceId, item, findError) || item.hostFingerprint != identity_.fingerprint) {
@@ -344,7 +349,10 @@ void Host::receive(Packet type, const QByteArray &payload) {
         if (validDeviceHex(deviceId, 32) && validDeviceHex(o.value("device_secret").toString(), 64) && trustedStore_) {
             TrustedDevice item{deviceId, o.value("device_name").toString(), QByteArray::fromHex(o.value("device_secret").toString().toLatin1()), identity_.fingerprint, QDateTime::currentDateTimeUtc(), QDateTime::currentDateTimeUtc()};
             QString saveError;
-            if (!trustedStore_->upsert(item, saveError)) emit status(QStringLiteral("已连接，但无法记录此设备：") + saveError);
+            if (!trustedStore_->upsert(item, saveError)) {
+                pairingError_ = saveError;
+                completeAuthentication(o); return;
+            }
             else {
                 bool found = false; for (auto &known : trustedDevices_) if (known.id == item.id) { known = item; found = true; break; }
                 if (!found) trustedDevices_.append(item);
@@ -408,7 +416,8 @@ void Host::encoded(quint64 generation, QRect bounds, QByteArray bytes, QString c
     --encodeQueued_;
     if (bounds != screen_) {
         releaseInput(); screen_ = bounds;
-        if (!wire_->send(Packet::Welcome, json({{"v", 1}, {"width", screen_.width()}, {"height", screen_.height()}, {"control", control_}, {"login_screen", loginScreen_}, {"file_transfer", filesAllowed_}, {"file_offer", fileOffersAllowed_}, {"clipboard", clipboardAllowed_}, {"codec", codec}, {"fps", targetFps_}, {"window", frameWindow_}}))) {
+        if (!wire_->send(Packet::Welcome, json({{"v", 1}, {"width", screen_.width()}, {"height", screen_.height()}, {"control", control_}, {"login_screen", loginScreen_}, {"file_transfer", filesAllowed_}, {"file_offer", fileOffersAllowed_}, {"clipboard", clipboardAllowed_}, {"codec", codec}, {"fps", targetFps_}, {"window", frameWindow_},
+                {"paired_device_id", activeDeviceId_}, {"pairing_error", activeDeviceId_.isEmpty() ? pairingError_ : QString()}, {"host_name", QSysInfo::machineHostName()}}))) {
             drop(QStringLiteral("发送桌面信息失败")); return;
         }
         // Start watching only after Welcome is queued, so text cannot precede negotiation.
@@ -425,8 +434,7 @@ void Host::encoded(quint64 generation, QRect bounds, QByteArray bytes, QString c
 Client::Client(QObject *parent, const QString &deviceDirectory) : QObject(parent), files_(this), clipboard_(this) {
     if (!deviceDirectory.isEmpty()) {
         deviceStore_ = std::make_unique<DeviceIdentityStore>(deviceDirectory);
-        QString error;
-        if (!deviceStore_->loadOrCreate(deviceIdentity_, error)) emit status(QStringLiteral("无法保存控制设备凭据：") + error);
+        deviceStore_->loadOrCreate(deviceIdentity_, deviceStorageError_);
     }
     connect(&files_, &FileTransferClient::send, this, [this](const QByteArray &payload) {
         if (ready_ && files_.available() && wire_ && !wire_->send(Packet::File, payload))
@@ -491,8 +499,8 @@ void Client::sendAuth() {
 void Client::start(const Invitation &invitation) {
     stop(); invitation_ = invitation;
     if (deviceStore_ && !deviceIdentity_.valid()) {
-        QString error;
-        if (!deviceStore_->loadOrCreate(deviceIdentity_, error)) emit status(QStringLiteral("无法记录认证设备：") + error);
+        deviceStorageError_.clear();
+        deviceStore_->loadOrCreate(deviceIdentity_, deviceStorageError_);
     }
     deviceName_ = QSysInfo::machineHostName();
     if (deviceName_.isEmpty()) deviceName_ = QHostInfo::localHostName();
@@ -557,15 +565,26 @@ void Client::receive(Packet type, const QByteArray &payload) {
         if ((ready_ && codec != codec_) || (codec == "h264" && !VideoDecoder::available())) { fail(QStringLiteral("不支持远端视频编码")); return; }
         codec_ = codec; targetFps_ = qBound(1, o.value("fps").toInt(10), 60);
         frameWindow_ = qBound(1, o.value("window").toInt(1), 3);
-        if (!ready_) { statsClock_.start(); intervalClock_.start(); statsTimer_.start(); }
+        const bool firstWelcome = !ready_;
+        if (firstWelcome) { statsClock_.start(); intervalClock_.start(); statsTimer_.start(); }
         control_ = o.value("control").toBool();
         loginScreen_ = control_ && o.value("login_screen").toBool(false);
         ready_ = true; emit capability(control_); emit loginScreenCapability(loginScreen_);
         files_.setAvailable(control_ && o.value("file_transfer").toBool(false));
         files_.setOfferAvailable(files_.available() && o.value("file_offer").toBool(false));
         clipboard_.setEnabled(control_ && o.value("clipboard").toBool(false));
-        if (!deviceIdentity_.id.isEmpty()) emit deviceAuthenticated(deviceIdentity_.id, deviceName_, invitation_.host, invitation_.port, invitation_.fingerprint);
         emit status(QStringLiteral("已连接 · %1 × %2 · %3").arg(o.value("width").toInt()).arg(o.value("height").toInt()).arg(control_ ? (clipboard_.enabled() ? QStringLiteral("可控制 · 剪贴板自动同步") : QStringLiteral("可控制")) : QStringLiteral("仅观看")));
+        if (firstWelcome && deviceStore_) {
+            const bool paired = deviceIdentity_.valid() &&
+                (o.value("paired_device_id").toString() == deviceIdentity_.id || (resumeAuth_ && !o.contains("paired_device_id")));
+            if (paired) emit deviceAuthenticated(deviceIdentity_.id, o.value("host_name").toString(invitation_.host), invitation_.host, invitation_.port, invitation_.fingerprint);
+            else {
+                QString detail = deviceStorageError_;
+                if (detail.isEmpty()) detail = o.value("pairing_error").toString();
+                if (detail.isEmpty()) detail = QStringLiteral("远端未确认保存设备，请更新被控端后重新连接");
+                emit status(QStringLiteral("已连接，但未保存免密设备：") + detail);
+            }
+        }
     } else if (type == Packet::Image && ready_) {
         if (++queuedDecode_ > frameWindow_) { fail(QStringLiteral("远端视频超出接收窗口")); return; }
         ++receivedFrames_; receivedBytes_ += quint64(payload.size());
@@ -784,9 +803,9 @@ void ControlWindow::setFileCapability(bool enabled) { filesButton_->setEnabled(e
 void ControlWindow::sessionEnded() { localShortcutKeys_.clear(); viewer_->reset(); wakeButton_->setEnabled(false); filesButton_->setEnabled(false); performance_->clear(); hide(); }
 void ControlWindow::closeEvent(QCloseEvent *event) { emit disconnectRequested(); event->accept(); }
 
-Window::Window() : host_(this, QDir(QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation)).filePath("sharing")),
+Window::Window(bool headlessHost) : host_(this, QDir(QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation)).filePath("sharing")),
     client_(this, QDir(QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation)).filePath("client")),
-    controlWindow_(std::make_unique<ControlWindow>()) {
+    controlWindow_(std::make_unique<ControlWindow>()), headlessHost_(headlessHost) {
     profileStore_ = std::make_unique<DeviceProfileStore>(QDir(QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation)).filePath("connections"));
     fileWindow_ = std::make_unique<FileTransferDialog>(client_.fileTransfer(), controlWindow_.get());
     setWindowTitle(QStringLiteral("bananaDesk · 局域网远程桌面"));
@@ -883,12 +902,12 @@ Window::Window() : host_(this, QDir(QStandardPaths::writableLocation(QStandardPa
     const QString autostartLabel = QStringLiteral("登录系统后自动启动并开始共享");
     const QString autostartTip = QStringLiteral("Windows 用户登录后启动；系统尚未登录时不能控制桌面。");
 #else
-    preloginServiceEnabled_ = autostartConfigured();
+    preloginServiceEnabled_ = !headlessHost_ && preloginServiceState(QStringLiteral("is-active"));
     if (preloginServiceEnabled_) inviteFile_ = preloginInvitationPath();
     const QString autostartLabel = QStringLiteral("开机后自动启动共享（登录前可连接）");
-    const QString autostartTip = QStringLiteral("使用 systemd 在 Linux 图形登录界面启动共享。仅支持 X11，不支持 Wayland；第一次启用需要管理员授权。");
+    const QString autostartTip = QStringLiteral("使用 systemd 在 Linux 图形登录界面启动共享。仅支持 X11，不支持 Wayland；第一次启用需要管理员授权。共享时勾选不会断开当前连接，下次开机生效。");
 #endif
-    autostart_ = new QCheckBox(autostartLabel); autostart_->setObjectName(QStringLiteral("autostartSharing")); autostart_->setChecked(autostartConfigured()); shareLayout->addWidget(autostart_);
+    autostart_ = new QCheckBox(autostartLabel); autostart_->setObjectName(QStringLiteral("autostartSharing")); autostart_->setChecked(!headlessHost_ && autostartConfigured()); shareLayout->addWidget(autostart_);
     autostart_->setToolTip(autostartTip);
 #ifdef Q_OS_WIN
     auto *lockHint = new QLabel(QStringLiteral("远程解锁需先在本机安装运行包中的登录辅助服务，再启动共享；通过系统登录画面输入密码或 PIN。"));
@@ -1001,7 +1020,14 @@ Window::Window() : host_(this, QDir(QStandardPaths::writableLocation(QStandardPa
             const QSignalBlocker blocker(autostart_); autostart_->setChecked(!enabled);
             showStatus(QStringLiteral("开机自启设置失败：") + error);
         } else {
-            showStatus(enabled ? QStringLiteral("已设置开机自动共享；Linux 登录前即可连接") : QStringLiteral("已关闭开机自动共享"));
+#ifdef Q_OS_WIN
+            showStatus(enabled ? QStringLiteral("已设置登录系统后自动共享") : QStringLiteral("已关闭自动共享"));
+#else
+            showStatus(enabled ? (host_.running()
+                ? QStringLiteral("已设置开机自动共享，下次开机生效；当前共享和连接继续保持")
+                : QStringLiteral("登录前共享服务已启动；可使用原共享码连接"))
+                : (host_.running() ? QStringLiteral("已关闭开机自动共享；当前共享继续保持") : QStringLiteral("已关闭开机自动共享")));
+#endif
         }
     });
     connect(&host_, &Host::trustedDevicesChanged, this, &Window::refreshTrustedDevices);
@@ -1030,7 +1056,7 @@ Window::Window() : host_(this, QDir(QStandardPaths::writableLocation(QStandardPa
         device.invitation.fingerprint = fingerprint; device.lastConnected = QDateTime::currentDateTimeUtc();
         QString error;
         if (!profileStore_->upsert(device, error)) showStatus(QStringLiteral("已连接，但无法保存免密设备：") + error);
-        else { refreshSavedDevices(); showStatus(QStringLiteral("已记录控制设备：%1").arg(name)); }
+        else { refreshSavedDevices(); showStatus(QStringLiteral("已连接 · 已保存远程设备：%1，下次可免输共享码").arg(name)); }
     });
     auto *viewer = controlWindow_->viewer();
     connect(&client_, &Client::frame, viewer, &Viewer::setFrame);
@@ -1044,13 +1070,26 @@ Window::Window() : host_(this, QDir(QStandardPaths::writableLocation(QStandardPa
     connect(&client_, &Client::statistics, controlWindow_.get(), &ControlWindow::setStatistics);
     connect(qApp, &QGuiApplication::applicationStateChanged, this, [this](Qt::ApplicationState state) { if (state != Qt::ApplicationActive) client_.release(); });
     refreshSavedDevices();
-#ifndef Q_OS_WIN
-    if (preloginServiceEnabled_) {
+    {
         QString error;
-        if (!host_.reloadTrustedDevices(error)) showStatus(QStringLiteral("无法读取登录前服务的设备记录：") + error);
+        if (!host_.reloadTrustedDevices(error)) showStatus(QStringLiteral("无法读取已认证设备：") + error);
     }
-#endif
     refreshTrustedDevices();
+    if (!headlessHost_) {
+        // A background host writes its own records. Reload while this window
+        // is not hosting so it also reflects pairing done by that process.
+        auto *recordsTimer = new QTimer(this);
+        recordsTimer->setInterval(1000);
+        connect(recordsTimer, &QTimer::timeout, this, [this] {
+            if (!host_.running()) {
+                QString error;
+                if (!host_.reloadTrustedDevices(error)) {
+                    trustedDevices_->setToolTip(error);
+                } else trustedDevices_->setToolTip(QString());
+            }
+        });
+        recordsTimer->start();
+    }
 #ifndef Q_OS_WIN
     if (preloginServiceEnabled_) {
         share_->setEnabled(false);
@@ -1137,6 +1176,7 @@ void Window::connectSavedDevice() {
 }
 void Window::refreshTrustedDevices() {
     if (!trustedDevices_) return;
+    const QString selected = trustedDevices_->currentData().toString();
     const QSignalBlocker blocker(trustedDevices_);
     trustedDevices_->clear();
     for (const auto &device : host_.trustedDevices()) {
@@ -1144,6 +1184,9 @@ void Window::refreshTrustedDevices() {
         trustedDevices_->addItem(QStringLiteral("%1 · 最近 %2").arg(label, device.lastSeen.toLocalTime().toString(QStringLiteral("yyyy-MM-dd HH:mm"))), device.id);
     }
     const bool available = trustedDevices_->count() > 0;
+    const int selection = trustedDevices_->findData(selected);
+    if (selection >= 0) trustedDevices_->setCurrentIndex(selection);
+    trustedDevices_->setPlaceholderText(QStringLiteral("尚无记录，请用新版控制端连接一次"));
     trustedDevices_->setEnabled(available); forgetTrusted_->setEnabled(available);
 }
 bool Window::setAutostart(bool enabled, QString &error) {
@@ -1155,10 +1198,7 @@ bool Window::setAutostart(bool enabled, QString &error) {
     if (settings.status() != QSettings::NoError) { error = QStringLiteral("无法写入当前用户启动项"); return false; }
     return true;
 #else
-    if (host_.running()) {
-        error = QStringLiteral("请先停止当前手动共享，再切换开机自动共享");
-        return false;
-    }
+    const bool wasRunning = host_.running();
     const QString script = preloginScriptPath(enabled ? QStringLiteral("install-prelogin.sh")
                                                      : QStringLiteral("uninstall-prelogin.sh"));
     if (script.isEmpty()) {
@@ -1187,6 +1227,7 @@ bool Window::setAutostart(bool enabled, QString &error) {
                   << QStringLiteral("--port") << QString::number(port_->value())
                   << QStringLiteral("--invite-file") << preloginInvitationPath()
                   << QStringLiteral("--display") << display;
+        if (wasRunning) arguments << QStringLiteral("--defer-start");
     } else {
         arguments << script << QStringLiteral("--uid") << QString::number(getuid());
     }
@@ -1202,14 +1243,23 @@ bool Window::setAutostart(bool enabled, QString &error) {
         error = QStringLiteral("无法启动 pkexec：%1").arg(process.errorString());
         return false;
     }
-    if (!process.waitForFinished(-1) || process.exitStatus() != QProcess::NormalExit || process.exitCode() != 0) {
+    // Keep network timers and the authorization dialog responsive while the
+    // external helper runs; changing autostart must not stall a live session.
+    autostartChanging_ = true;
+    centralWidget()->setEnabled(false);
+    QEventLoop authorization;
+    connect(&process, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), &authorization, &QEventLoop::quit);
+    if (process.state() != QProcess::NotRunning) authorization.exec();
+    centralWidget()->setEnabled(true);
+    autostartChanging_ = false;
+    if (process.exitStatus() != QProcess::NormalExit || process.exitCode() != 0) {
         QString detail = QString::fromLocal8Bit(process.readAllStandardError()).trimmed();
         if (detail.isEmpty()) detail = QString::fromLocal8Bit(process.readAllStandardOutput()).trimmed();
         error = detail.isEmpty() ? QStringLiteral("管理员授权被取消或 systemd 服务安装失败") : detail;
         return false;
     }
-    preloginServiceEnabled_ = enabled;
-    if (enabled) {
+    preloginServiceEnabled_ = enabled && !wasRunning;
+    if (enabled && !wasRunning) {
         inviteFile_ = preloginInvitationPath();
         share_->setText(QStringLiteral("登录前共享服务运行中"));
         resetCode_->setEnabled(false);
@@ -1221,7 +1271,7 @@ bool Window::setAutostart(bool enabled, QString &error) {
             if (file.open(QIODevice::ReadOnly) && file.size() <= 2048)
                 invitation_->setPlainText(QString::fromUtf8(file.readAll()).trimmed());
         });
-    } else {
+    } else if (!wasRunning) {
         inviteFile_.clear();
         share_->setEnabled(true); share_->setText(QStringLiteral("开始共享")); resetCode_->setEnabled(true);
         addresses_->setEnabled(true); port_->setEnabled(true); allowControl_->setEnabled(true);
@@ -1277,5 +1327,5 @@ void Window::connectFile(const QString &path) {
     if (!file.open(QIODevice::ReadOnly) || file.size() > 2048) { showStatus(QStringLiteral("无法读取连接码文件")); return; }
     connectCode_->setPlainText(QString::fromUtf8(file.readAll())); tabs_->setCurrentIndex(1); connectCode();
 }
-void Window::closeEvent(QCloseEvent *event) { client_.stop(); host_.stop(); event->accept(); }
+void Window::closeEvent(QCloseEvent *event) { if (autostartChanging_) { event->ignore(); return; } client_.stop(); host_.stop(); event->accept(); }
 }
